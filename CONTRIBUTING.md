@@ -1,61 +1,98 @@
-# Contribuindo para [Nome do Projeto]
+# Contributing to PhotonProtocol
 
-Agradecemos seu interesse em contribuir para [Nome do Projeto]! Aqui estão algumas diretrizes para ajudar você a começar:
+Thank you for wanting to help. This document is short and specific; please read
+it before opening a pull request.
 
-## Processo de Contribuição
+## The two rules that matter most
 
-1. Faça um fork do repositório.
-2. Crie sua branch de recurso (`git checkout -b feature/nome-da-sua-branch`).
-3. Commit suas alterações (`git commit -m 'Adicionando nova funcionalidade'`).
-4. Envie para a branch (`git push origin feature/nome-da-sua-branch`).
-5. Abra um Pull Request na branch `main`.
+**1. No change to the wire format without updating `SPEC.md` in the same
+commit.** The specification is the product. A repository whose code has quietly
+moved ahead of its specification is not a protocol, it is one program with a
+document attached.
 
-## Padrões de Código
+**2. No optimisation without a benchmark showing the gain.** The open questions
+in `SPEC.md` §12 are open precisely because they should be settled by
+measurement. An argument, however good, is not a measurement.
 
-Por favor, siga os padrões de código estabelecidos:
+## Branches
 
-- Use 4 espaços para indentação.
-- Nomeie variáveis e funções de forma descritiva.
-- Adicione comentários claros e úteis.
-- Teste seu código antes de submeter.
+- `main` holds released, reviewed work. Nothing is pushed to it directly.
+- `develop` is the integration branch. Branch from it, and target it with pull
+  requests.
+- Working branches are named `feature/…`, `fix/…`, `docs/…` or `spec/…`.
 
-## Issues
+## Commits
 
-Sinta-se à vontade para abrir uma issue se encontrar um bug ou tiver uma sugestão de melhoria. Inclua o máximo de detalhes possível para que possamos reproduzir e entender o problema.
+[Conventional Commits](https://www.conventionalcommits.org/), with the scope
+being the crate or area: `feat(core):`, `fix(cli):`, `docs(spec):`, `ci:`,
+`build:`, `test:`, `refactor:`, `perf:`, `chore:`.
 
-## Testes
+Keep commits small and self-contained. A commit that changes one thing and
+explains why is worth more than a commit that changes six things and says
+"updates". Every commit on `develop` should build and pass its tests, so that
+`git bisect` stays usable.
 
-Certifique-se de que todos os testes passem antes de enviar seu pull request. Para rodar os testes, execute:
+**The subject line says what changed; the body says why.** What changed is
+already visible in the diff. Why it changed — the constraint you were under,
+the alternative you rejected, the failure mode you were avoiding — is not, and
+in six months it is the only part anyone needs.
+
+## Before opening a pull request
 
 ```bash
-python -m unittest discover
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets
 ```
 
-### 4. **CODE_OF_CONDUCT.md**
+If you touched anything the specification publishes, also run the independent
+derivations:
 
-```md
-# Código de Conduta do [Nome do Projeto]
+```bash
+node tools/geometry/frame-geometry.js
+node tools/geometry/test-vectors.js
+```
 
-## Nossa Posição
+CI runs all of this on Linux, Windows and macOS. The protocol is byte-exact by
+definition, so a platform-dependent result is a bug, not an inconvenience.
 
-Queremos que [Nome do Projeto] seja um espaço acolhedor, amigável e inclusivo para todos. Como tal, esperamos que todos os colaboradores sigam este código de conduta.
+## Testing expectations
 
-## Comportamento Esperado
+- Every binary format — header, manifest, unit framing — gets round-trip tests
+  and fixed vectors published in `SPEC.md`, so third-party implementations can
+  check themselves against the same bytes.
+- Decoder failures get tests too. `SPEC.md` §9.2 requires a decoder to say
+  *which* stage failed and how close it came; a decoder that returns a bare
+  error is not conforming, and the tests should catch that.
+- Performance claims get a `criterion` benchmark alongside them.
 
-- Seja respeitoso e inclusivo.
-- Seja colaborativo e evite disputas desnecessárias.
-- Respeite opiniões divergentes e considere críticas construtivas.
+## Proposing a change to the format
 
-## Comportamento Inaceitável
+Open an issue first, before writing code. Say what the change costs in cells,
+what it buys in robustness or density, and how you would measure the trade.
+Changes that add reserved regions or alter the scan order need a
+`protocol_version` bump and should be batched rather than trickled.
 
-- Assédio de qualquer tipo.
-- Uso de linguagem ou imagens ofensivas ou sexualmente explícitas.
-- Ataques pessoais ou políticos.
+If you found the specification ambiguous — two readings, both defensible — that
+is a defect in the specification even if the reference implementation does
+something sensible. Please report it as one.
 
-## Reportando Problemas
+## Style
 
-Se você ver ou experimentar qualquer comportamento que viole este código de conduta, por favor, entre em contato com os mantenedores do projeto.
+- Code, comments, documentation and the specification are in **English**. The
+  README is also translated to Portuguese; other translations are welcome.
+- `rustfmt` and `clippy` settle formatting and lint questions. Their
+  configuration is in the repository, so please change the configuration rather
+  than sprinkling `#[allow]`.
+- An `#[allow]` that is genuinely warranted needs a comment saying why.
+- Comments explain *why*. The code already says what.
 
-## Aplicação
+## Licensing of contributions
 
-Violações deste código de conduta podem resultar em medidas disciplinares, como a exclusão de contribuições e/ou a proibição de participação no projeto.
+By contributing, you agree that your work is licensed under both the MIT
+licence and the Apache License 2.0, matching the project's dual licence. You
+also confirm you have the right to contribute it.
+
+## Code of conduct
+
+Participation is governed by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
