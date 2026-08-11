@@ -35,6 +35,7 @@
 //! rewritten against a format that moved underneath it.
 
 pub mod error;
+pub mod fec;
 pub mod frame;
 pub mod geom;
 pub mod image;
