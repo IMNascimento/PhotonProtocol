@@ -16,7 +16,9 @@ self.onmessage = async (event) => {
     switch (message.type) {
       case 'start': {
         await init();
-        receiver = new Receiver(message.profile);
+        // `undefined` asks the receiver to work the profile out from the
+        // frames, which is what it does unless someone insists otherwise.
+        receiver = new Receiver(message.profile ?? undefined);
         self.postMessage({ type: 'ready' });
         break;
       }

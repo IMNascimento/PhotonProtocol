@@ -50,17 +50,24 @@
 
 <fieldset>
   <legend>Settings</legend>
-  <label for="profile">Profile the sender used</label>
+  <label for="profile">Profile</label>
   <select id="profile"></select>
   <p class="note">
-    If you did not change it on the sending device, leave this alone.
+    Leave this alone. The frames say which profile drew them, so there is
+    nothing to match between the two devices.
   </p>
 </fieldset>
 
 <div class="row">
   <button id="start" disabled>Start</button>
-  <button id="stop" class="secondary hidden">Stop</button>
+  <button id="stop" class="secondary hidden">Give up</button>
 </div>
+<p class="note">
+  Once started this reads until it has the whole file, then stops on its own and
+  offers it to you. It does not matter that you joined the sender halfway
+  through — it keeps going into the next pass. "Give up" is only there for when
+  you want to stop early and see how far it got.
+</p>
 
 <div id="live" class="hidden">
   <h2>Progress</h2>

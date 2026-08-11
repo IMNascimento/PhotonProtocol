@@ -107,7 +107,13 @@ async function start() {
 
   worker = new Worker(new URL('./decoder-worker.js', import.meta.url), { type: 'module' });
   worker.onmessage = onWorkerMessage;
-  worker.postMessage({ type: 'start', profile: PROFILES[ui.profile.selectedIndex].id });
+  // Index 0 is "detect automatically". The frames say which profile drew
+  // them, so making a person match a setting on two devices only creates a way
+  // to get it wrong.
+  const chosen = ui.profile.selectedIndex === 0
+    ? null
+    : PROFILES[ui.profile.selectedIndex - 1].id;
+  worker.postMessage({ type: 'start', profile: chosen });
 }
 
 function onWorkerMessage(event) {
@@ -189,7 +195,9 @@ function updateAim() {
     return;
   }
   if (session.used > 0) {
-    ui.aim.textContent = 'Reading. Keep the screen in shot until this finishes.';
+    ui.aim.textContent =
+      'Reading. Keep the screen in shot — this stops and offers the file by ' +
+      'itself as soon as it has enough, however many passes that takes.';
   }
 }
 
@@ -377,12 +385,16 @@ try {
   await init();
   PROFILES = JSON.parse(profiles());
 
+  const auto = document.createElement('option');
+  auto.textContent = 'Detect automatically';
+  ui.profile.append(auto);
+
   for (const profile of PROFILES) {
     const option = document.createElement('option');
     option.textContent = profile.name;
     ui.profile.append(option);
   }
-  ui.profile.selectedIndex = Math.min(1, PROFILES.length - 1);
+  ui.profile.selectedIndex = 0;
 
   const hasCamera = Boolean(navigator.mediaDevices?.getUserMedia);
   setMode(hasCamera ? 'camera' : 'file');
