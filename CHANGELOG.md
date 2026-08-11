@@ -16,6 +16,29 @@ Drafts are not interoperable with one another.
 
 ## [Unreleased]
 
+Phase 1 in progress: the codec works end to end through a synthetic channel.
+Frame detection is still outstanding, so a receiver must currently be told where
+the code area sits in the image.
+
+### Added
+
+- Complete encoder and decoder in `photon-core`: cell alphabet and per-frame
+  classifier, frame geometry with rendering and sampling, Reed-Solomon over
+  GF(256) with erasures and interleaving, frame headers and payload units, the
+  session manifest with Brotli and SHA-256, the RaptorQ symbol stream, and the
+  transmitter and receiver that tie them together.
+- A configurable, seeded channel simulator, and `photon simulate` to sweep it.
+- `docs/phase-1-report.md`: the first measurements of the physical layer.
+
+### Changed
+
+- Compression is Brotli rather than Zstandard. Zstandard's reference library is
+  C and both web pages run as WebAssembly; Brotli is pure Rust and, measured on
+  a source-and-documentation corpus, 8.2% smaller. Zstandard keeps a registered
+  identifier as an optional algorithm.
+- The declared minimum supported Rust version is 1.89, which `raptorq` sets
+  rather than this code.
+
 ## [0.1.0] — 2026-08-11
 
 Phase 0: the specification, and the scaffolding needed to work on it.

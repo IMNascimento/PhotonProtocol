@@ -45,22 +45,32 @@ correção.
 
 ## Situação atual
 
-**Fase 0 de 5.** A especificação é um rascunho em revisão; o codec ainda não foi
-escrito. O formato é instável até que [`SPEC.md`](SPEC.md) receba a tag `1.0`, e
-rascunhos não são interoperáveis entre si.
+**Fase 1 de 5.** Um arquivo entra por uma ponta e sai pela outra, com resumo
+conferido, atravessando um canal sintético distorcido. O formato é instável até
+que [`SPEC.md`](SPEC.md) receba a tag `1.0`, e rascunhos não são interoperáveis
+entre si.
 
 | Fase | Entrega | Estado |
 | --- | --- | --- |
 | 0 | Rascunho da especificação, workspace, CI | concluída |
-| 1 | Codificador, decodificador e simulador de canal sintético | próxima |
+| 1 | Codificador, decodificador e simulador de canal sintético | codec pronto; **detecção** do quadro pendente |
 | 2 | CLI de bancada, primeira decodificação de vídeo real | |
 | 3 | Página emissora | |
 | 4 | Página decodificadora, publicada no GitHub Pages | |
 | 5 | Otimização, guiada pelas medições das fases 1 e 2 | |
 
+Hoje é preciso informar ao receptor onde a área do código está na imagem.
+Encontrá-la — localizar os quatro marcadores de canto e recuperar a homografia —
+é a última peça da fase 1.
+
 Nenhum número de throughput aparece aqui de propósito. A meta é superar o
 estado da arte, mas o número que entrar neste README será um número **medido**
 na fase 2, não um número desejado na fase 0.
+
+As primeiras medições estão em
+[`docs/phase-1-report.md`](docs/phase-1-report.md), incluindo um resultado
+negativo: a margem de confiança do classificador não acompanha o erro o
+suficiente para justificar a decodificação por apagamentos.
 
 ## O formato, em resumo
 

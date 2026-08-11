@@ -43,22 +43,31 @@ correctness.
 
 ## Status
 
-**Phase 0 of 5.** The specification is a reviewed draft; the codec is not
-written yet. The wire format is unstable until [`SPEC.md`](SPEC.md) is tagged
-`1.0`, and drafts are not interoperable with each other.
+**Phase 1 of 5.** A file goes in one end and comes out the other, digest
+verified, through a distorted synthetic channel. The wire format is unstable
+until [`SPEC.md`](SPEC.md) is tagged `1.0`, and drafts are not interoperable
+with each other.
 
 | Phase | Deliverable | State |
 | --- | --- | --- |
 | 0 | Specification draft, workspace, CI | done |
-| 1 | Encoder, decoder and a synthetic channel simulator | next |
+| 1 | Encoder, decoder and a synthetic channel simulator | codec done; frame **detection** outstanding |
 | 2 | Bench command line, first decode of real camera footage | |
 | 3 | Emitter page | |
 | 4 | Decoder page, deployed to GitHub Pages | |
 | 5 | Optimisation, driven by phase 1 and 2 measurements | |
 
+The receiver currently has to be told where the code area sits in the image.
+Finding it — locating the four finder patterns and recovering the homography —
+is the last piece of phase 1.
+
 No throughput figure is quoted here on purpose. The target is to beat the
 state of the art, but the number that goes in this README will be one that was
 measured in phase 2, not one that was hoped for in phase 0.
+
+The first measurements are in [`docs/phase-1-report.md`](docs/phase-1-report.md),
+including a negative result: the classifier's confidence margin does not track
+error well enough for erasure decoding to be earning its place.
 
 ## The format, briefly
 
