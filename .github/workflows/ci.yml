@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    name: Format and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup component add rustfmt clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --workspace --all-targets --all-features
+      - name: Test documentation examples
+        run: cargo test --workspace --doc
+
+  msrv:
+    name: Minimum supported Rust version
+    runs-on: ubuntu-latest
+    env:
+      # Takes precedence over rust-toolchain.toml, which tracks stable.
+      RUSTUP_TOOLCHAIN: "1.85"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup toolchain install 1.85 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo check --workspace --all-targets --all-features
+
+  wasm:
+    name: WebAssembly build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install target
+        run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build for wasm32
+        run: cargo build --release -p photon-wasm --target wasm32-unknown-unknown
+      - name: Install wasm-pack
+        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+      - name: Package for the web
+        run: wasm-pack build wasm --release --target web --out-dir pkg
+      - name: Report artefact size
+        # Every byte here is downloaded by someone on a phone, possibly on a
+        # connection they are using precisely because they have no other way to
+        # move a file. Growth should be visible in the log, not discovered later.
+        run: ls -l wasm/pkg/*.wasm
+
+  spec:
+    name: Specification cross-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Recompute the frame geometry
+        run: node tools/geometry/frame-geometry.js
+      - name: Recompute the test vectors
+        # Self-checks both CRC parameterisations against their published check
+        # values before computing anything, so a wrong polynomial fails here
+        # rather than in somebody else's decoder.
+        run: node tools/geometry/test-vectors.js
+      - name: Rederive the shape alphabet
+        run: node tools/symbol-design/shape-search.js

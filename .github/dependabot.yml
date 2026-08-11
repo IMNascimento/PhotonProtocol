@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    target-branch: develop
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "build"
+      include: scope
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    target-branch: develop
+    commit-message:
+      prefix: "ci"
