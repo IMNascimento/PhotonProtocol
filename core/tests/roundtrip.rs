@@ -133,7 +133,7 @@ fn dropped_frames_cost_time_and_not_correctness() {
     while !rx.is_complete() && frames < 300 {
         let frame = tx.next_frame(8).expect("painted");
         frames += 1;
-        if frames % 2 == 0 {
+        if frames.is_multiple_of(2) {
             continue;
         }
         let capture = channel.apply(&frame.image, &source_transform);

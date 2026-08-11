@@ -168,8 +168,8 @@ impl Transmitter {
         let mut used = 0usize;
         let mut flags = FrameFlags::empty();
 
-        let include_manifest =
-            capacity > MANIFEST_IN_EVERY_FRAME_ABOVE || self.frame_seq % MANIFEST_PERIOD == 0;
+        let include_manifest = capacity > MANIFEST_IN_EVERY_FRAME_ABOVE
+            || self.frame_seq.is_multiple_of(MANIFEST_PERIOD);
         if include_manifest && self.manifest_unit.encoded_len() <= capacity {
             used += self.manifest_unit.encoded_len();
             units.push(self.manifest_unit.clone());
@@ -186,7 +186,8 @@ impl Transmitter {
             units.push(unit);
         }
 
-        if self.frame_seq % u32::try_from(self.frames_per_pass.max(1)).unwrap_or(u32::MAX) == 0 {
+        let pass_length = u32::try_from(self.frames_per_pass.max(1)).unwrap_or(u32::MAX);
+        if self.frame_seq.is_multiple_of(pass_length) {
             flags = flags.union(FrameFlags::LOOP_RESTART);
         }
 
@@ -419,10 +420,10 @@ impl Receiver {
             match unit.kind {
                 unit_type::MANIFEST => self.take_manifest(&unit.data),
                 unit_type::RQ_SYMBOL => {
-                    if let Some(transport) = self.transport.as_mut() {
-                        if transport.push(&unit.data) {
-                            report.new_symbols += 1;
-                        }
+                    if let Some(transport) = self.transport.as_mut()
+                        && transport.push(&unit.data)
+                    {
+                        report.new_symbols += 1;
                     }
                 }
                 // Unknown types are the format's extension point. Skipping one
