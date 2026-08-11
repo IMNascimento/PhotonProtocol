@@ -5,15 +5,17 @@
 //! with numbers attached — throughput, frames used and dropped, cell error rate
 //! per frame — because those are what settle the open questions in `SPEC.md`
 //! §12.
-//!
-//! Argument parsing is hand-rolled while there is exactly one command. A parser
-//! crate arrives with `encode` and `decode` in phase 2, when there is a command
-//! surface worth the dependency.
 
+mod decode;
+mod encode;
+mod media;
+
+use std::path::PathBuf;
 use std::process::ExitCode;
 
+use clap::{Parser, Subcommand, ValueEnum};
 use photon_core::simulate::{Channel, measure};
-use photon_core::{PROTOCOL_VERSION, SPEC_VERSION, profile::PROFILES};
+use photon_core::{PROTOCOL_VERSION, ProfileId, SPEC_VERSION, profile::PROFILES};
 
 /// Confidence threshold the receiver uses to flag a cell as an erasure.
 const ERASURE_CONFIDENCE: f32 = 0.08;
@@ -25,45 +27,114 @@ const ERASURE_CONFIDENCE: f32 = 0.08;
 /// Q1 asks to be measured rather than assumed.
 const SWEEP_CELL_PX: u32 = 12;
 
-const USAGE: &str = "\
-photon — PhotonProtocol bench command line
+#[derive(Parser)]
+#[command(
+    name = "photon",
+    about = "PhotonProtocol bench command line",
+    version,
+    disable_help_subcommand = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
 
-USAGE:
-    photon <COMMAND>
+#[derive(Subcommand)]
+enum Command {
+    /// Turn a file into a sequence of frames to display.
+    Encode {
+        /// The file to send.
+        input: PathBuf,
+        /// Where to write the frames. Defaults to `<name>-frames`.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Physical-layer profile.
+        #[arg(short, long, value_enum, default_value_t = Profile::P2)]
+        profile: Profile,
+        /// Pixels per cell. Larger frames are easier to film and need a bigger
+        /// screen.
+        #[arg(long, default_value_t = 8)]
+        cell_px: u32,
+        /// How many times to repeat the full set of source symbols. Above one,
+        /// the extra frames are repair symbols.
+        #[arg(long, default_value_t = 1.5)]
+        passes: f64,
+        /// Frame rate to assemble the video at.
+        #[arg(long, default_value_t = 30)]
+        fps: u32,
+        /// Also assemble a lossless video with ffmpeg.
+        #[arg(long)]
+        video: bool,
+    },
 
-COMMANDS:
-    profiles    List the physical-layer profiles and their derived geometry
-    simulate    Sweep the synthetic channel and report cell error rates
-    version     Print the implementation and protocol versions
-    help        Print this message
-";
+    /// Read a recording, or a directory of frames, back into the file.
+    Decode {
+        /// The recording, or a directory of extracted frames.
+        input: PathBuf,
+        /// Where to write the recovered file.
+        #[arg(short, long, default_value = ".")]
+        out: PathBuf,
+        /// Physical-layer profile the frames were drawn with.
+        #[arg(short, long, value_enum, default_value_t = Profile::P2)]
+        profile: Profile,
+        /// Stop after this many frames.
+        #[arg(long)]
+        max_frames: Option<usize>,
+    },
+
+    /// List the physical-layer profiles and their derived geometry.
+    Profiles,
+
+    /// Sweep the synthetic channel and report cell error rates.
+    Simulate,
+}
+
+/// Profile names as the command line spells them.
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum Profile {
+    /// `P1-conservative`.
+    P1,
+    /// `P2-standard`.
+    P2,
+    /// `P3-dense`.
+    P3,
+}
+
+impl From<Profile> for ProfileId {
+    fn from(profile: Profile) -> Self {
+        match profile {
+            Profile::P1 => Self::P1Conservative,
+            Profile::P2 => Self::P2Standard,
+            Profile::P3 => Self::P3Dense,
+        }
+    }
+}
 
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        Some("profiles") => {
+    let cli = Cli::parse();
+
+    let outcome = match cli.command {
+        Command::Encode { input, out, profile, cell_px, passes, fps, video } => {
+            let target = out.unwrap_or_else(|| encode::default_output(&input));
+            encode::run(&input, &target, profile.into(), cell_px, passes, fps, video)
+        }
+        Command::Decode { input, out, profile, max_frames } => {
+            decode::run(&input, &out, profile.into(), max_frames)
+        }
+        Command::Profiles => {
             print_profiles();
-            ExitCode::SUCCESS
+            Ok(())
         }
-        Some("simulate") => {
+        Command::Simulate => {
             print_simulation();
-            ExitCode::SUCCESS
+            Ok(())
         }
-        Some("version") => {
-            print_version();
-            ExitCode::SUCCESS
-        }
-        Some("help" | "--help" | "-h") => {
-            print!("{USAGE}");
-            ExitCode::SUCCESS
-        }
-        None => {
-            print!("{USAGE}");
-            ExitCode::FAILURE
-        }
-        Some(unknown) => {
-            eprintln!("photon: unknown command '{unknown}'\n");
-            eprint!("{USAGE}");
+    };
+
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("photon: {message}");
             ExitCode::FAILURE
         }
     }
@@ -129,12 +200,6 @@ fn print_simulation() {
     println!("and the numbers above should be re-read then (SPEC.md Q1, Q3).");
 }
 
-fn print_version() {
-    println!("photon {}", env!("CARGO_PKG_VERSION"));
-    println!("protocol version {PROTOCOL_VERSION}");
-    println!("specification {SPEC_VERSION} (draft — wire format unstable)");
-}
-
 fn print_profiles() {
     println!(
         "{:<16} {:>4} {:>9} {:>5} {:>10} {:>15} {:>10} {:>9}",
@@ -166,4 +231,10 @@ fn print_profiles() {
             println!("{:<16} {:>4} {:>9} {:>5} {:>10} {:>15}", "", "", "", "", "", shortened);
         }
     }
+
+    println!();
+    println!(
+        "photon {} — protocol {PROTOCOL_VERSION}, spec {SPEC_VERSION} (draft)",
+        env!("CARGO_PKG_VERSION")
+    );
 }

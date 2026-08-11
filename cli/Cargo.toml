@@ -15,7 +15,10 @@ name = "photon"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "4.6.6", features = ["derive"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 photon-core.workspace = true
+rayon = "1.12.0"
 
 [lints]
 workspace = true
