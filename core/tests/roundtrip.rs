@@ -58,7 +58,7 @@ fn transfer(
     locate: Locate,
 ) -> Result<(Vec<u8>, usize, usize), Error> {
     let mut tx = Transmitter::new(name, file, profile, 0x0BAD_C0DE).expect("transfer prepared");
-    let mut rx = Receiver::new(profile);
+    let mut rx = Receiver::for_profile(profile);
 
     let mut frames = 0usize;
     let mut lost = 0usize;
@@ -175,7 +175,7 @@ fn a_recording_that_starts_before_the_screen_is_in_shot_is_survivable() {
     let profile = ProfileId::P2Standard;
 
     let mut tx = Transmitter::new("late.txt", &file, profile, 11).expect("prepared");
-    let mut rx = Receiver::new(profile);
+    let mut rx = Receiver::for_profile(profile);
 
     for shade in [20u8, 90, 200] {
         let junk = RgbImage::filled(600, 400, Rgb::new(shade, shade, shade));
@@ -205,7 +205,7 @@ fn dropped_frames_cost_time_and_not_correctness() {
     let profile = ProfileId::P2Standard;
 
     let mut tx = Transmitter::new("lossy.txt", &file, profile, 42).expect("prepared");
-    let mut rx = Receiver::new(profile);
+    let mut rx = Receiver::for_profile(profile);
     let source_transform = frame_transform(profile, 8);
 
     let mut frames = 0usize;

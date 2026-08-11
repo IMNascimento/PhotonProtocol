@@ -59,7 +59,7 @@ impl Tally {
 pub(crate) fn run(
     input: &Path,
     output: &Path,
-    profile: ProfileId,
+    profile: Option<ProfileId>,
     max_frames: Option<usize>,
 ) -> Result<(), String> {
     let scratch = std::env::temp_dir().join(format!("photon-decode-{}", std::process::id()));
@@ -69,10 +69,13 @@ pub(crate) fn run(
     if let Some(info) = timing {
         println!("Recording       {:.2} s at {:.2} fps", info.duration, info.fps);
     }
-    println!("Profile         {}", profile.profile().name);
+    match profile {
+        Some(id) => println!("Profile         {}", id.profile().name),
+        None => println!("Profile         detect from the frames"),
+    }
     println!();
 
-    let receiver = Receiver::new(profile);
+    let receiver = profile.map_or_else(Receiver::new, Receiver::for_profile);
 
     // Reading a frame is the expensive half and depends on nothing else, so it
     // runs across every core. Folding the readings in has to happen in order,
@@ -123,6 +126,9 @@ pub(crate) fn run(
     }
 
     let result = receiver.finish();
+    if let Some(id) = receiver.profile() {
+        println!("Read as         {}", id.profile().name);
+    }
     print_frame_report(&tally);
     print_progress(&receiver);
 

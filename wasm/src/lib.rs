@@ -181,15 +181,29 @@ pub struct Receiver {
 
 #[wasm_bindgen]
 impl Receiver {
-    /// A receiver expecting frames of the given profile.
+    /// A receiver.
+    ///
+    /// Pass a profile only if it is genuinely known; omit it and the frames are
+    /// asked which profile drew them, which they carry in a header written the
+    /// same way for every profile precisely so it can be read first.
     ///
     /// # Errors
     ///
     /// Returns the protocol's own message for an unknown profile.
     #[wasm_bindgen(constructor)]
-    pub fn new(profile: u8) -> Result<Receiver, JsValue> {
-        let profile = profile_from(profile).map_err(to_js)?;
-        Ok(Self { inner: CoreReceiver::new(profile) })
+    pub fn new(profile: Option<u8>) -> Result<Receiver, JsValue> {
+        let inner = match profile {
+            Some(id) => CoreReceiver::for_profile(profile_from(id).map_err(to_js)?),
+            None => CoreReceiver::new(),
+        };
+        Ok(Self { inner })
+    }
+
+    /// The profile the frames turned out to be drawn with.
+    #[wasm_bindgen(js_name = detectedProfile)]
+    #[must_use]
+    pub fn detected_profile(&self) -> Option<u8> {
+        self.inner.profile().map(photon_core::ProfileId::as_u8)
     }
 
     /// Offers one video frame as RGBA, as `getImageData` produces it.
@@ -334,7 +348,7 @@ mod tests {
         let mut emitter = Emitter::new("through.bin", &file, 0x02, 8, 4242).expect("prepared");
         let side = emitter.side();
 
-        let mut receiver = Receiver::new(0x02).expect("receiver");
+        let mut receiver = Receiver::new(Some(0x02)).expect("receiver");
         for _ in 0..40 {
             if receiver.is_complete() {
                 break;

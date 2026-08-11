@@ -74,9 +74,10 @@ enum Command {
         /// Where to write the recovered file.
         #[arg(short, long, default_value = ".")]
         out: PathBuf,
-        /// Physical-layer profile the frames were drawn with.
-        #[arg(short, long, value_enum, default_value_t = Profile::P2)]
-        profile: Profile,
+        /// Profile the frames were drawn with. Worked out from the frames
+        /// themselves when not given.
+        #[arg(short, long, value_enum)]
+        profile: Option<Profile>,
         /// Stop after this many frames.
         #[arg(long)]
         max_frames: Option<usize>,
@@ -119,7 +120,7 @@ fn main() -> ExitCode {
             encode::run(&input, &target, profile.into(), cell_px, passes, fps, video)
         }
         Command::Decode { input, out, profile, max_frames } => {
-            decode::run(&input, &out, profile.into(), max_frames)
+            decode::run(&input, &out, profile.map(Into::into), max_frames)
         }
         Command::Profiles => {
             print_profiles();

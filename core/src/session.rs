@@ -18,16 +18,25 @@ use crate::fec::PayloadCodec;
 use crate::file::{Compression, Manifest, compress, decompress, digest};
 use crate::frame::{FrameLayout, bytes_to_cells, cell_byte_span, cells_to_bytes};
 use crate::image::RgbImage;
-use crate::profile::ProfileId;
+use crate::profile::{PROFILES, ProfileId};
 use crate::symbol::Classifier;
 use crate::transport::{PAYLOAD_ID_LEN, TransportDecoder, TransportEncoder, choose_symbol_size};
 
-/// Payload capacity above which the manifest is worth putting in every frame
-/// (`SPEC.md` §7.1).
-const MANIFEST_IN_EVERY_FRAME_ABOVE: usize = 4096;
-
-/// Otherwise the manifest goes in one frame out of this many.
-const MANIFEST_PERIOD: u32 = 8;
+/// How often the manifest is sent, in frames.
+///
+/// Every frame. `SPEC.md` §7.1 permits one in eight and recommends every frame
+/// above 4096 bytes of capacity, and the reference implementation used to follow
+/// that literally — which meant `P1-conservative`, at 2611 bytes, sent the
+/// manifest in one frame out of eight.
+///
+/// That was the wrong trade, and precisely backwards. A receiver reads a
+/// fraction of the frames shown to it: a camera skips some, a slow decoder
+/// skips more, glare takes others. Making the one indispensable unit eight times
+/// rarer than the rest multiplies that fraction by itself, and until it arrives
+/// every symbol received has nowhere to go. The manifest costs about 3% of a
+/// frame on the profile where it was being rationed, and buying a failure mode
+/// back for 3% is not a trade worth making.
+const MANIFEST_PERIOD: u32 = 1;
 
 /// Confidence below which a cell is offered to the decoder as an erasure.
 ///
@@ -169,8 +178,7 @@ impl Transmitter {
         let mut used = 0usize;
         let mut flags = FrameFlags::empty();
 
-        let include_manifest = capacity > MANIFEST_IN_EVERY_FRAME_ABOVE
-            || self.frame_seq.is_multiple_of(MANIFEST_PERIOD);
+        let include_manifest = self.frame_seq.is_multiple_of(MANIFEST_PERIOD);
         if include_manifest && self.manifest_unit.encoded_len() <= capacity {
             used += self.manifest_unit.encoded_len();
             units.push(self.manifest_unit.clone());
@@ -313,6 +321,22 @@ pub struct FrameReading {
     pub pixels_per_cell: Option<f64>,
 }
 
+impl FrameReading {
+    /// The reading for a picture with no code in it.
+    #[must_use]
+    fn not_located() -> Self {
+        Self {
+            outcome: FrameOutcome::NotLocated,
+            header: None,
+            units: Vec::new(),
+            units_rejected: 0,
+            doubtful_cells: 0,
+            total_cells: 0,
+            pixels_per_cell: None,
+        }
+    }
+}
+
 /// A file rebuilt from a recording.
 #[derive(Debug, Clone)]
 pub struct ReceivedFile {
@@ -322,34 +346,102 @@ pub struct ReceivedFile {
     pub bytes: Vec<u8>,
 }
 
-/// Collects frames until it can rebuild the file.
-pub struct Receiver {
+/// The geometry and codec for one candidate profile.
+struct Candidate {
+    id: ProfileId,
     layout: FrameLayout,
     payload_codec: PayloadCodec,
+}
+
+/// Collects frames until it can rebuild the file.
+pub struct Receiver {
+    candidates: Vec<Candidate>,
     detector: Detector,
     session_id: Option<u32>,
     manifest: Option<Manifest>,
     transport: Option<TransportDecoder>,
+    /// Symbols that arrived before the manifest did.
+    ///
+    /// They are perfectly good symbols; the only thing missing is the
+    /// transmission information needed to feed them anywhere. Dropping them
+    /// would waste every frame before the first readable manifest, which on a
+    /// profile that carries the manifest occasionally is most of them.
+    orphans: Vec<Vec<u8>>,
     seen_frames: HashSet<u32>,
     frames_seen: usize,
     frames_used: usize,
+    frames_located: usize,
+    frames_headered: usize,
+}
+
+/// Orphan symbols to hold before the manifest arrives.
+///
+/// Bounded because the buffer is fed by untrusted input: a recording of
+/// something that merely resembles a frame must not be able to grow it without
+/// limit. Generous enough to cover any plausible wait for a manifest.
+const MAX_ORPHANS: usize = 4096;
+
+impl Default for Receiver {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Receiver {
-    /// A receiver expecting frames of the given profile.
+    /// A receiver that works out the profile from what it sees.
+    ///
+    /// The frames say which profile drew them, in a header written the same way
+    /// for every profile precisely so that it can be read before the profile is
+    /// known. Requiring a person to match a setting on two devices, and giving
+    /// them nothing but a failure when they do not, was a mistake this replaces.
     #[must_use]
-    pub fn new(profile: ProfileId) -> Self {
+    pub fn new() -> Self {
+        Self::over(PROFILES.iter().map(|p| p.id).collect())
+    }
+
+    /// A receiver restricted to one profile.
+    ///
+    /// Slightly cheaper, and worth it only when the profile is genuinely known.
+    #[must_use]
+    pub fn for_profile(profile: ProfileId) -> Self {
+        Self::over(vec![profile])
+    }
+
+    fn over(profiles: Vec<ProfileId>) -> Self {
+        let detector =
+            if profiles.len() == 1 { Detector::for_profile(profiles[0]) } else { Detector::new() };
+
         Self {
-            layout: FrameLayout::new(profile.profile()),
-            payload_codec: PayloadCodec::for_profile(profile.profile()),
-            detector: Detector::for_profile(profile),
+            candidates: profiles
+                .into_iter()
+                .map(|id| Candidate {
+                    id,
+                    layout: FrameLayout::new(id.profile()),
+                    payload_codec: PayloadCodec::for_profile(id.profile()),
+                })
+                .collect(),
+            detector,
             session_id: None,
             manifest: None,
             transport: None,
+            orphans: Vec::new(),
             seen_frames: HashSet::new(),
             frames_seen: 0,
             frames_used: 0,
+            frames_located: 0,
+            frames_headered: 0,
         }
+    }
+
+    /// The candidate for a profile, if this receiver is considering it.
+    fn candidate(&self, profile: ProfileId) -> Option<&Candidate> {
+        self.candidates.iter().find(|c| c.id == profile)
+    }
+
+    /// The profile this receiver has settled on, once a frame has been read.
+    #[must_use]
+    pub fn profile(&self) -> Option<ProfileId> {
+        (self.candidates.len() == 1).then(|| self.candidates[0].id)
     }
 
     /// The manifest, once any frame has carried a readable one.
@@ -362,6 +454,22 @@ impl Receiver {
     #[must_use]
     pub const fn frame_counts(&self) -> (usize, usize) {
         (self.frames_seen, self.frames_used)
+    }
+
+    /// How far the frames got: seen, located, header read, used.
+    ///
+    /// The shape of a failure is in these four numbers. Nothing located means
+    /// aim; located but no header means the capture is too poor; headers but no
+    /// manifest means keep going a little longer.
+    #[must_use]
+    pub const fn stage_counts(&self) -> (usize, usize, usize, usize) {
+        (self.frames_seen, self.frames_located, self.frames_headered, self.frames_used)
+    }
+
+    /// Symbols held back because the manifest has not arrived yet.
+    #[must_use]
+    pub fn orphan_symbols(&self) -> usize {
+        self.orphans.len()
     }
 
     /// Distinct symbols collected and the number needed, once the manifest has
@@ -393,7 +501,15 @@ impl Receiver {
     /// rather than a located frame want [`Receiver::accept_image`]; this exists
     /// for tests and for callers doing their own detection.
     pub fn accept_frame(&mut self, image: &RgbImage, transform: &Homography) -> FrameReport {
-        self.absorb(self.read_frame(image, transform))
+        // Without a detection there is nothing to say which profile drew the
+        // frame, so every candidate is tried and the first readable header wins.
+        for candidate in &self.candidates {
+            let reading = read_frame(candidate, image, transform);
+            if reading.header.is_some() {
+                return self.absorb(reading);
+            }
+        }
+        self.absorb(FrameReading::not_located())
     }
 
     /// Reads everything a single picture can yield, changing nothing.
@@ -406,20 +522,15 @@ impl Receiver {
     #[must_use]
     pub fn examine(&self, image: &RgbImage) -> FrameReading {
         match self.detector.detect(image) {
-            Ok(detection) => {
-                let mut reading = self.read_frame(image, &detection.transform);
-                reading.pixels_per_cell = Some(detection.pixels_per_cell());
-                reading
-            }
-            Err(_) => FrameReading {
-                outcome: FrameOutcome::NotLocated,
-                header: None,
-                units: Vec::new(),
-                units_rejected: 0,
-                doubtful_cells: 0,
-                total_cells: self.layout.data_cells().len(),
-                pixels_per_cell: None,
+            Ok(detection) => match self.candidate(detection.profile) {
+                Some(candidate) => {
+                    let mut reading = read_frame(candidate, image, &detection.transform);
+                    reading.pixels_per_cell = Some(detection.pixels_per_cell());
+                    reading
+                }
+                None => FrameReading::not_located(),
             },
+            Err(_) => FrameReading::not_located(),
         }
     }
 
@@ -442,11 +553,26 @@ impl Receiver {
             pixels_per_cell: reading.pixels_per_cell,
         };
 
+        if reading.pixels_per_cell.is_some() {
+            self.frames_located += 1;
+        }
+        if reading.header.is_some() {
+            self.frames_headered += 1;
+        }
+
         let Some(header) = reading.header else {
             return report;
         };
         if reading.outcome != FrameOutcome::Decoded {
             return report;
+        }
+
+        // The frames say which profile drew them. Once one has, stop
+        // considering the others: it makes every later frame cheaper and
+        // removes any chance of a stray fit to the wrong geometry.
+        if self.candidates.len() > 1 {
+            self.candidates.retain(|c| c.id == header.profile);
+            self.detector = Detector::for_profile(header.profile);
         }
 
         match self.session_id {
@@ -466,14 +592,22 @@ impl Receiver {
         report.units_accepted = reading.units.len();
         for unit in reading.units {
             match unit.kind {
-                unit_type::MANIFEST => self.take_manifest(&unit.data),
-                unit_type::RQ_SYMBOL => {
-                    if let Some(transport) = self.transport.as_mut()
-                        && transport.push(&unit.data)
-                    {
-                        report.new_symbols += 1;
+                unit_type::MANIFEST => report.new_symbols += self.take_manifest(&unit.data),
+                unit_type::RQ_SYMBOL => match self.transport.as_mut() {
+                    Some(transport) => {
+                        if transport.push(&unit.data) {
+                            report.new_symbols += 1;
+                        }
                     }
-                }
+                    // No manifest yet, so there is nowhere to put this symbol.
+                    // Hold it rather than drop it: it is a perfectly good
+                    // symbol and the manifest is on its way.
+                    None => {
+                        if self.orphans.len() < MAX_ORPHANS {
+                            self.orphans.push(unit.data);
+                        }
+                    }
+                },
                 // Unknown types are the format's extension point. Skipping one
                 // is correct behaviour, not an error.
                 _ => {}
@@ -486,63 +620,6 @@ impl Receiver {
         report
     }
 
-    /// Reads a located frame down to its payload units.
-    fn read_frame(&self, image: &RgbImage, transform: &Homography) -> FrameReading {
-        let mut reading = FrameReading {
-            outcome: FrameOutcome::HeaderUnreadable,
-            header: None,
-            units: Vec::new(),
-            units_rejected: 0,
-            doubtful_cells: 0,
-            total_cells: self.layout.data_cells().len(),
-            pixels_per_cell: None,
-        };
-
-        let Some(header) = self.read_header(image, transform) else {
-            return reading;
-        };
-        reading.header = Some(header);
-
-        // The classifier is fitted to this frame's own calibration ring, never
-        // to the nominal palette: exposure and white balance move while the
-        // camera records, so references from any other frame are already stale.
-        let classifier = self.fit_classifier(image, transform);
-        let bits = self.layout.profile().bits_per_cell();
-
-        let mut cells = Vec::with_capacity(self.layout.data_cells().len());
-        let mut doubtful = Vec::new();
-        for (index, &cell) in self.layout.data_cells().iter().enumerate() {
-            let sample = self.layout.sample_cell(image, transform, cell);
-            let call = classifier.classify(&sample);
-            cells.push(call.value);
-            if call.confidence < ERASURE_CONFIDENCE {
-                doubtful.push(index);
-            }
-        }
-        reading.doubtful_cells = doubtful.len();
-
-        let raw = cells_to_bytes(&cells, bits, self.payload_codec.raw_len());
-        let erasures = Self::erasure_positions(&doubtful, bits);
-
-        // Erasure hints come from a heuristic. If they do not help, the same
-        // frame may still decode without them, and a frame given up on is one
-        // somebody has to film again.
-        let Ok(payload) = self
-            .payload_codec
-            .decode(&raw, &erasures)
-            .or_else(|_| self.payload_codec.decode(&raw, &[]))
-        else {
-            reading.outcome = FrameOutcome::PayloadUnrecoverable;
-            return reading;
-        };
-
-        let (units, rejected) = parse_units(&payload, usize::from(header.payload_len));
-        reading.units = units;
-        reading.units_rejected = rejected;
-        reading.outcome = FrameOutcome::Decoded;
-        reading
-    }
-
     /// Rebuilds the file.
     ///
     /// # Errors
@@ -551,6 +628,21 @@ impl Receiver {
     /// not enough symbols and how many are short, a decompression failure, or a
     /// digest mismatch.
     pub fn finish(&mut self) -> Result<ReceivedFile> {
+        // `SPEC.md` §9.2 requires the stage that gave up to be named. Reporting
+        // a missing manifest when no frame was ever located sends someone off
+        // to film for longer when what they actually need is to aim, or to fix
+        // a setting -- the two most common real failures, told apart here by
+        // how far the frames got.
+        if self.manifest.is_none() {
+            if self.frames_located == 0 {
+                return Err(Error::NoFinders);
+            }
+            if self.frames_headered == 0 {
+                return Err(Error::HeaderUnrecoverable);
+            }
+            return Err(Error::NoManifest);
+        }
+
         let Some(manifest) = self.manifest.clone() else {
             return Err(Error::NoManifest);
         };
@@ -573,106 +665,183 @@ impl Receiver {
         Ok(ReceivedFile { name: manifest.name.clone(), bytes: file })
     }
 
-    /// Reads whichever copy of the header survives.
-    fn read_header(&self, image: &RgbImage, transform: &Homography) -> Option<FrameHeader> {
-        let codeword_len = self.layout.profile().header_codeword_len() as usize;
-        let (dark, light) = self.timing_levels(image, transform);
-        let threshold = f32::midpoint(dark, light);
-
-        for band in 0..2 {
-            let cells = self.layout.header_band(band);
-            let mut bytes = vec![0u8; codeword_len];
-            for (index, &cell) in cells.iter().take(codeword_len * 8).enumerate() {
-                let luma = self.layout.sample_cell_mean(image, transform, cell).luma();
-                if luma > threshold {
-                    bytes[index / 8] |= 1 << (7 - index % 8);
-                }
-            }
-            if let Ok(header) = FrameHeader::decode_codeword(&bytes, &[]) {
-                return Some(header);
-            }
-        }
-        None
-    }
-
-    /// Black and white levels measured from this frame's timing ring.
-    ///
-    /// The ring alternates by construction, so it is a per-frame reference for
-    /// what "dark" and "light" mean through this camera at this exposure —
-    /// which is the only way to threshold the header without assuming an
-    /// exposure the emitter never chose.
-    fn timing_levels(&self, image: &RgbImage, transform: &Homography) -> (f32, f32) {
-        let grid = self.layout.grid();
-        let mut dark = (0.0f32, 0u32);
-        let mut light = (0.0f32, 0u32);
-
-        let mut consider = |row: u32, col: u32, even: bool| {
-            let luma = self.layout.sample_cell_mean(image, transform, row * grid + col).luma();
-            if even {
-                dark.0 += luma;
-                dark.1 += 1;
-            } else {
-                light.0 += luma;
-                light.1 += 1;
-            }
-        };
-
-        for col in 8..grid - 8 {
-            consider(0, col, col % 2 == 0);
-            consider(grid - 1, col, col % 2 == 0);
-        }
-        for row in 8..grid - 8 {
-            consider(row, 0, row % 2 == 0);
-            consider(row, grid - 1, row % 2 == 0);
-        }
-
-        let mean = |(sum, count): (f32, u32)| if count == 0 { 0.0 } else { sum / count as f32 };
-        (mean(dark), mean(light))
-    }
-
-    /// Fits the per-frame classifier to the calibration ring.
-    fn fit_classifier(&self, image: &RgbImage, transform: &Homography) -> Classifier {
-        let labelled: Vec<(u16, crate::symbol::CellSample)> = self
-            .layout
-            .calibration_cells()
-            .iter()
-            .enumerate()
-            .map(|(index, &cell)| {
-                (
-                    self.layout.calibration_value(index),
-                    self.layout.sample_cell(image, transform, cell),
-                )
-            })
-            .collect();
-        Classifier::fit(self.layout.alphabet(), &labelled)
-    }
-
-    /// Turns doubtful cells into the byte positions they touched.
-    fn erasure_positions(doubtful: &[usize], bits: u32) -> Vec<usize> {
-        let mut positions = Vec::with_capacity(doubtful.len() * 2);
-        for &index in doubtful {
-            let (first, last) = cell_byte_span(index, bits);
-            for position in first..=last {
-                positions.push(position);
-            }
-        }
-        positions.sort_unstable();
-        positions.dedup();
-        positions
-    }
-
-    fn take_manifest(&mut self, bytes: &[u8]) {
+    /// Takes the manifest from a unit, and releases any symbols that were
+    /// waiting for it.
+    fn take_manifest(&mut self, bytes: &[u8]) -> usize {
         if self.manifest.is_some() {
-            return;
+            return 0;
         }
-        let Ok(manifest) = Manifest::decode(bytes) else { return };
+        let Ok(manifest) = Manifest::decode(bytes) else { return 0 };
         if !manifest.compression.is_supported() {
-            return;
+            return 0;
         }
-        let Ok(transport) = TransportDecoder::new(manifest.oti) else { return };
+        let Ok(mut transport) = TransportDecoder::new(manifest.oti) else { return 0 };
+
+        // Everything held back until this moment is now usable. On a profile
+        // that carries the manifest only occasionally these are most of the
+        // frames read so far, and throwing them away was making a slow channel
+        // slower for no reason.
+        let mut released = 0usize;
+        for symbol in std::mem::take(&mut self.orphans) {
+            if transport.push(&symbol) {
+                released += 1;
+            }
+        }
+
         self.manifest = Some(manifest);
         self.transport = Some(transport);
+        released
     }
+}
+
+/// Reads whichever copy of the header survives.
+fn read_header(
+    layout: &FrameLayout,
+    image: &RgbImage,
+    transform: &Homography,
+) -> Option<FrameHeader> {
+    let codeword_len = layout.profile().header_codeword_len() as usize;
+    let (dark, light) = timing_levels(layout, image, transform);
+    let threshold = f32::midpoint(dark, light);
+
+    for band in 0..2 {
+        let cells = layout.header_band(band);
+        let mut bytes = vec![0u8; codeword_len];
+        for (index, &cell) in cells.iter().take(codeword_len * 8).enumerate() {
+            let luma = layout.sample_cell_mean(image, transform, cell).luma();
+            if luma > threshold {
+                bytes[index / 8] |= 1 << (7 - index % 8);
+            }
+        }
+        if let Ok(header) = FrameHeader::decode_codeword(&bytes, &[]) {
+            return Some(header);
+        }
+    }
+    None
+}
+
+/// Black and white levels measured from this frame's timing ring.
+///
+/// The ring alternates by construction, so it is a per-frame reference for what
+/// "dark" and "light" mean through this camera at this exposure — which is the
+/// only way to threshold the header without assuming an exposure the emitter
+/// never chose.
+fn timing_levels(layout: &FrameLayout, image: &RgbImage, transform: &Homography) -> (f32, f32) {
+    let grid = layout.grid();
+    let mut dark = (0.0f32, 0u32);
+    let mut light = (0.0f32, 0u32);
+
+    let mut consider = |row: u32, col: u32, even: bool| {
+        let luma = layout.sample_cell_mean(image, transform, row * grid + col).luma();
+        if even {
+            dark.0 += luma;
+            dark.1 += 1;
+        } else {
+            light.0 += luma;
+            light.1 += 1;
+        }
+    };
+
+    for col in 8..grid - 8 {
+        consider(0, col, col % 2 == 0);
+        consider(grid - 1, col, col % 2 == 0);
+    }
+    for row in 8..grid - 8 {
+        consider(row, 0, row % 2 == 0);
+        consider(row, grid - 1, row % 2 == 0);
+    }
+
+    let mean = |(sum, count): (f32, u32)| if count == 0 { 0.0 } else { sum / count as f32 };
+    (mean(dark), mean(light))
+}
+
+/// Fits the per-frame classifier to the calibration ring.
+fn fit_classifier(layout: &FrameLayout, image: &RgbImage, transform: &Homography) -> Classifier {
+    let labelled: Vec<(u16, crate::symbol::CellSample)> = layout
+        .calibration_cells()
+        .iter()
+        .enumerate()
+        .map(|(index, &cell)| {
+            (layout.calibration_value(index), layout.sample_cell(image, transform, cell))
+        })
+        .collect();
+    Classifier::fit(layout.alphabet(), &labelled)
+}
+
+/// Turns doubtful cells into the byte positions they touched.
+fn erasure_positions(doubtful: &[usize], bits: u32) -> Vec<usize> {
+    let mut positions = Vec::with_capacity(doubtful.len() * 2);
+    for &index in doubtful {
+        let (first, last) = cell_byte_span(index, bits);
+        for position in first..=last {
+            positions.push(position);
+        }
+    }
+    positions.sort_unstable();
+    positions.dedup();
+    positions
+}
+
+/// Reads a located frame down to its payload units, for one candidate profile.
+fn read_frame(candidate: &Candidate, image: &RgbImage, transform: &Homography) -> FrameReading {
+    let layout = &candidate.layout;
+    let codec = &candidate.payload_codec;
+
+    let mut reading = FrameReading {
+        outcome: FrameOutcome::HeaderUnreadable,
+        header: None,
+        units: Vec::new(),
+        units_rejected: 0,
+        doubtful_cells: 0,
+        total_cells: layout.data_cells().len(),
+        pixels_per_cell: None,
+    };
+
+    let Some(header) = read_header(layout, image, transform) else {
+        return reading;
+    };
+    // A header that names a different profile means this candidate's geometry
+    // happened to produce a readable header for someone else's frame. Believing
+    // it would decode the payload against the wrong cell map.
+    if header.profile != candidate.id {
+        return reading;
+    }
+    reading.header = Some(header);
+
+    // The classifier is fitted to this frame's own calibration ring, never to
+    // the nominal palette: exposure and white balance move while the camera
+    // records, so references from any other frame are already stale.
+    let classifier = fit_classifier(layout, image, transform);
+    let bits = layout.profile().bits_per_cell();
+
+    let mut cells = Vec::with_capacity(layout.data_cells().len());
+    let mut doubtful = Vec::new();
+    for (index, &cell) in layout.data_cells().iter().enumerate() {
+        let sample = layout.sample_cell(image, transform, cell);
+        let call = classifier.classify(&sample);
+        cells.push(call.value);
+        if call.confidence < ERASURE_CONFIDENCE {
+            doubtful.push(index);
+        }
+    }
+    reading.doubtful_cells = doubtful.len();
+
+    let raw = cells_to_bytes(&cells, bits, codec.raw_len());
+    let erasures = erasure_positions(&doubtful, bits);
+
+    // Erasure hints come from a heuristic. If they do not help, the same frame
+    // may still decode without them, and a frame given up on is one somebody
+    // has to film again.
+    let Ok(payload) = codec.decode(&raw, &erasures).or_else(|_| codec.decode(&raw, &[])) else {
+        reading.outcome = FrameOutcome::PayloadUnrecoverable;
+        return reading;
+    };
+
+    let (units, rejected) = parse_units(&payload, usize::from(header.payload_len));
+    reading.units = units;
+    reading.units_rejected = rejected;
+    reading.outcome = FrameOutcome::Decoded;
+    reading
 }
 
 #[cfg(test)]
@@ -715,12 +884,12 @@ mod tests {
         for profile in &PROFILES {
             let file = sample_file(9_000);
             let mut tx = Transmitter::new("report.pdf", &file, profile.id, 0x0BAD_C0DE).unwrap();
-            let mut rx = Receiver::new(profile.id);
+            let mut rx = Receiver::for_profile(profile.id);
 
             let mut frames = 0usize;
             while !rx.is_complete() && frames < 400 {
                 let frame = tx.next_frame(8).unwrap();
-                let transform = rx.layout.identity_transform(8);
+                let transform = FrameLayout::new(profile.id.profile()).identity_transform(8);
                 let report = rx.accept_frame(&frame.image, &transform);
                 assert_eq!(
                     report.outcome,
@@ -745,8 +914,8 @@ mod tests {
         // arriving, and the fountain code has to accept whatever window it gets.
         let file = sample_file(12_000);
         let mut tx = Transmitter::new("late.bin", &file, ProfileId::P2Standard, 7).unwrap();
-        let mut rx = Receiver::new(ProfileId::P2Standard);
-        let transform = rx.layout.identity_transform(8);
+        let mut rx = Receiver::for_profile(ProfileId::P2Standard);
+        let transform = FrameLayout::new(ProfileId::P2Standard.profile()).identity_transform(8);
 
         for _ in 0..5 {
             tx.next_frame(8).unwrap();
@@ -771,8 +940,8 @@ mod tests {
         let mut first = Transmitter::new("a.bin", &file, ProfileId::P2Standard, 1).unwrap();
         let mut second = Transmitter::new("b.bin", &file, ProfileId::P2Standard, 2).unwrap();
 
-        let mut rx = Receiver::new(ProfileId::P2Standard);
-        let transform = rx.layout.identity_transform(8);
+        let mut rx = Receiver::for_profile(ProfileId::P2Standard);
+        let transform = FrameLayout::new(ProfileId::P2Standard.profile()).identity_transform(8);
 
         let frame = first.next_frame(8).unwrap();
         assert_eq!(rx.accept_frame(&frame.image, &transform).outcome, FrameOutcome::Decoded);
@@ -790,8 +959,8 @@ mod tests {
         // is wasted work, and counting it as progress would misreport.
         let file = sample_file(4_000);
         let mut tx = Transmitter::new("dup.bin", &file, ProfileId::P2Standard, 3).unwrap();
-        let mut rx = Receiver::new(ProfileId::P2Standard);
-        let transform = rx.layout.identity_transform(8);
+        let mut rx = Receiver::for_profile(ProfileId::P2Standard);
+        let transform = FrameLayout::new(ProfileId::P2Standard.profile()).identity_transform(8);
 
         let frame = tx.next_frame(8).unwrap();
         assert_eq!(rx.accept_frame(&frame.image, &transform).outcome, FrameOutcome::Decoded);
@@ -807,8 +976,8 @@ mod tests {
         // filming needs the distance, not the verdict.
         let file = incompressible(60_000);
         let mut tx = Transmitter::new("short.bin", &file, ProfileId::P1Conservative, 5).unwrap();
-        let mut rx = Receiver::new(ProfileId::P1Conservative);
-        let transform = rx.layout.identity_transform(8);
+        let mut rx = Receiver::for_profile(ProfileId::P1Conservative);
+        let transform = FrameLayout::new(ProfileId::P1Conservative.profile()).identity_transform(8);
 
         let frame = tx.next_frame(8).unwrap();
         rx.accept_frame(&frame.image, &transform);
@@ -824,10 +993,82 @@ mod tests {
     }
 
     #[test]
-    fn a_receiver_that_has_seen_nothing_says_so() {
-        let mut rx = Receiver::new(ProfileId::P2Standard);
-        assert_eq!(rx.finish().unwrap_err(), Error::NoManifest);
+    fn a_failure_names_the_stage_that_actually_gave_up() {
+        // SPEC.md 9.2 asks for the stage, and the stages have completely
+        // different fixes: nothing located means aim the camera, a located
+        // frame with no readable header means the capture is too poor, and
+        // headers without a manifest means keep going. Reporting "no manifest"
+        // for all three -- which this used to do -- sends two thirds of people
+        // to film for longer when filming longer cannot help them.
+        let mut rx = Receiver::for_profile(ProfileId::P2Standard);
+        assert_eq!(rx.finish().unwrap_err(), Error::NoFinders);
         assert!(rx.progress().is_none());
+
+        let blank = RgbImage::filled(400, 400, crate::Rgb::WHITE);
+        assert_eq!(rx.accept_image(&blank).outcome, FrameOutcome::NotLocated);
+        assert_eq!(rx.finish().unwrap_err(), Error::NoFinders);
+        assert_eq!(rx.stage_counts(), (1, 0, 0, 0));
+    }
+
+    #[test]
+    fn symbols_that_arrive_before_the_manifest_are_kept() {
+        // Until the manifest lands there is nowhere to put a symbol, and the
+        // receiver used to drop them. On a channel where a receiver reads a
+        // fraction of the frames, that threw away everything before the first
+        // readable manifest for no reason.
+        let file = incompressible(40_000);
+        let profile = ProfileId::P1Conservative;
+        let mut tx = Transmitter::new("orphans.bin", &file, profile, 21).unwrap();
+        let mut rx = Receiver::for_profile(profile);
+        let transform = FrameLayout::new(profile.profile()).identity_transform(8);
+
+        // Feed a frame's units in by hand, with the manifest withheld, so the
+        // symbols have to wait for it.
+        let frame = tx.next_frame(8).unwrap();
+        let mut reading = rx.examine(&frame.image);
+        assert_eq!(reading.outcome, FrameOutcome::Decoded);
+
+        let withheld: Vec<_> =
+            reading.units.iter().filter(|u| u.kind == unit_type::MANIFEST).cloned().collect();
+        assert!(!withheld.is_empty(), "the frame should have carried a manifest");
+        reading.units.retain(|u| u.kind != unit_type::MANIFEST);
+
+        let report = rx.absorb(reading);
+        assert_eq!(report.new_symbols, 0, "no manifest yet, so nothing can be counted");
+        assert!(rx.orphan_symbols() > 0, "the symbols should have been kept");
+
+        // Now let a manifest through: the held symbols must be released.
+        let next = tx.next_frame(8).unwrap();
+        let report = rx.accept_frame(&next.image, &transform);
+        assert!(
+            report.new_symbols > 1,
+            "the manifest should have released the held symbols, got {}",
+            report.new_symbols
+        );
+        assert_eq!(rx.orphan_symbols(), 0);
+    }
+
+    #[test]
+    fn the_receiver_works_out_the_profile_by_itself() {
+        // Requiring a person to match a setting on two devices, and giving them
+        // nothing but a failure when they do not, was the single most likely way
+        // to make this look broken when it was not.
+        for profile in &PROFILES {
+            let file = sample_file(6_000);
+            let mut tx = Transmitter::new("auto.txt", &file, profile.id, 31).unwrap();
+            let mut rx = Receiver::new();
+
+            let mut frames = 0usize;
+            while !rx.is_complete() && frames < 200 {
+                let frame = tx.next_frame(8).unwrap();
+                let report = rx.accept_image(&frame.image);
+                assert_eq!(report.outcome, FrameOutcome::Decoded, "{}", profile.name);
+                frames += 1;
+            }
+
+            assert_eq!(rx.profile(), Some(profile.id), "{} was not identified", profile.name);
+            assert_eq!(rx.finish().unwrap().bytes, file, "{}", profile.name);
+        }
     }
 
     #[test]
@@ -837,8 +1078,8 @@ mod tests {
         // immediately instead of after eight frames.
         let file = sample_file(20_000);
         let mut tx = Transmitter::new("meta.bin", &file, ProfileId::P2Standard, 9).unwrap();
-        let mut rx = Receiver::new(ProfileId::P2Standard);
-        let transform = rx.layout.identity_transform(8);
+        let mut rx = Receiver::for_profile(ProfileId::P2Standard);
+        let transform = FrameLayout::new(ProfileId::P2Standard.profile()).identity_transform(8);
 
         let frame = tx.next_frame(8).unwrap();
         assert!(frame.header.flags.contains(FrameFlags::HAS_MANIFEST));
