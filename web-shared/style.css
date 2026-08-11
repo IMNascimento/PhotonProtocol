@@ -179,7 +179,21 @@ code {
   display: flex;
 }
 
+/* Never shrink, never smooth.
+ *
+ * The canvas is a flex item, and a flex item shrinks by default when it does
+ * not fit. A shrunk canvas is the whole code resampled at a fractional scale,
+ * which smears every cell boundary and erases the corner patterns a decoder
+ * looks for — silently, because it still looks like a code to a person.
+ * `image-rendering` does not prevent this: it chooses how a scaled image is
+ * interpolated, not whether the layout scales it.
+ *
+ * The frame is sized to fit before it is drawn, so refusing to shrink here
+ * turns a mis-fit into something visible rather than something subtle. */
 #frame {
+  flex: none;
+  max-width: none;
+  max-height: none;
   image-rendering: pixelated;
   image-rendering: crisp-edges;
 }
