@@ -665,11 +665,18 @@ header declares which one is in use.
 
 Derived quantities, for cross-checking an implementation:
 
-| profile | `W = G-16` | `Hr` | `nh` | reserved cells | `raw_bytes` | RS partition | parity rate |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `P1-conservative` | 80 | 4 | 40 | 1594 (17.3%) | 3811 | 14 x `RS(255,175)` + `RS(241,161)` | 31.4% |
-| `P2-standard` | 112 | 3 | 42 | 1882 (11.5%) | 9063 | 35 x `RS(255,199)` + `RS(138,82)` | 22.0% |
-| `P3-dense` | 144 | 3 | 54 | 2330 (9.1%) | 17452 | 68 x `RS(255,223)` + `RS(112,80)` | 12.5% |
+| profile | `W = G-16` | `Hr` | `nh` | reserved cells | `raw_bytes` | RS partition | parity `p/255` | link overhead |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `P1-conservative` | 80 | 4 | 40 | 1594 (17.3%) | 3811 | 14 x `RS(255,175)` + `RS(241,161)` | 31.4% | 31.5% |
+| `P2-standard` | 112 | 3 | 42 | 1882 (11.5%) | 9063 | 35 x `RS(255,199)` + `RS(138,82)` | 22.0% | 22.2% |
+| `P3-dense` | 144 | 3 | 54 | 2330 (9.1%) | 17452 | 68 x `RS(255,223)` + `RS(112,80)` | 12.5% | 12.7% |
+
+The two rightmost columns measure different things and must not be conflated.
+`p/255` is the parity fraction of the code and describes its correction
+strength. **Link overhead** is the fraction of the frame's raw bytes that never
+reach the transport layer, and it is slightly larger because the shortened
+trailing codeword pays full parity over fewer data bytes. Throughput is governed
+by the second.
 
 `P2-standard` is the default. An emitter MUST implement `P2-standard`; a decoder
 MUST implement all three.

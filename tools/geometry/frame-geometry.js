@@ -24,6 +24,9 @@ for (const p of profiles) {
   const cap = full * p.k + shortK;
   const dropped = useShort ? 0 : rem;
   rows.push({ ...p, b, W, Hr, nh, hSpare, reserved, data, raw, full, shortN, shortK, cap, dropped,
+              // parity fraction of the code itself, versus the share of the
+              // frame that never reaches the transport layer -- the shortened
+              // tail codeword makes the second slightly larger.
               rsRate: (par / 255 * 100).toFixed(1), overhead: ((1 - cap / raw) * 100).toFixed(1),
               reservedPct: (reserved / (p.g * p.g) * 100).toFixed(1) });
 }
