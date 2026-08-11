@@ -157,6 +157,13 @@ progress {
   font-size: 0.88rem;
 }
 
+/* A note that has stopped being background information: the setting it
+   describes cannot work, and it has to read as a warning rather than as the
+   grey small print everybody scrolls past. */
+.note.bad {
+  color: var(--bad);
+}
+
 code {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
   font-size: 0.9em;

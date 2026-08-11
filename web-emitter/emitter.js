@@ -90,6 +90,37 @@ function fitCellSize(grid, box) {
   return Math.max(3, Math.floor(shortest / cells));
 }
 
+/**
+ * Whether a profile can be drawn on this screen at a size a camera can read.
+ *
+ * `minCellPx` comes from the protocol rather than from here. Each cell carries
+ * a 4x4 shape mask, and a cell too small to give every sub-cell pixels of its
+ * own loses the shape — which is most of the payload: 3 of the 5 bits in
+ * P2-standard. The loss is not gradual for the 8-shape profiles. Painted with
+ * no camera in the path at all, P2-standard reads 5.9% of its cells wrongly at
+ * 7 pixels per cell and 0.0% at 8, and in every case the colour comes through
+ * perfectly and the shape is what fails.
+ */
+function fitsOnScreen(profile, box) {
+  return fitCellSize(profile.grid, box) >= profile.minCellPx;
+}
+
+/**
+ * The densest profile this screen can actually draw, or the sparsest if none
+ * can.
+ *
+ * Density is what everyone wants and the screen is what decides whether they
+ * may have it. Choosing for them beats defaulting to P2-standard everywhere and
+ * letting a laptop paint cells too small to read, which looks perfectly fine to
+ * whoever is pointing a camera at it.
+ */
+function bestProfile(box) {
+  for (let index = PROFILES.length - 1; index >= 0; index -= 1) {
+    if (fitsOnScreen(PROFILES[index], box)) return index;
+  }
+  return 0;
+}
+
 /** The box the code will be drawn into, in CSS pixels. */
 function stageBox() {
   const rect = ui.stage.getBoundingClientRect();
@@ -108,18 +139,39 @@ function nextFrame() {
 
 function describeProfile(profile, cellPx) {
   const side = (profile.grid + 2 * QUIET_ZONE_CELLS) * cellPx;
-  const advice = cellPx < 6
-    ? ' That is small — on a screen this size a more conservative profile draws bigger cells.'
-    : '';
-  return `${profile.grid}×${profile.grid} cells at ${profile.bitsPerCell} bits, ` +
+  const facts =
+    `${profile.grid}×${profile.grid} cells at ${profile.bitsPerCell} bits, ` +
     `${profile.payloadCapacity} bytes per frame. On this display that is ` +
-    `${cellPx} pixels per cell and a code of ${side}×${side} pixels.${advice}`;
+    `${cellPx} pixels per cell and a code of ${side}×${side} pixels.`;
+
+  if (cellPx >= profile.minCellPx) return facts;
+
+  const alternative = PROFILES.find((other) => fitsOnScreen(other, stageBox()));
+  return `${facts} That is below the ${profile.minCellPx} pixels a cell needs for its ` +
+    'shape to survive a camera, so this will not decode on this screen. ' +
+    (alternative
+      ? `Choose ${alternative.name}, which fits.`
+      : 'No profile fits this screen; send from a larger display.');
+}
+
+/** Relabels the profiles this screen cannot draw legibly. */
+function refreshProfileOptions() {
+  const box = stageBox();
+  PROFILES.forEach((profile, index) => {
+    const option = ui.profile.options[index];
+    if (!option) return;
+    option.textContent = fitsOnScreen(profile, box)
+      ? profile.name
+      : `${profile.name} — too dense for this screen`;
+  });
 }
 
 function refreshProfileNote() {
   const profile = PROFILES[ui.profile.selectedIndex];
   if (!profile) return;
-  ui.profileNote.textContent = describeProfile(profile, fitCellSize(profile.grid, stageBox()));
+  const cellPx = fitCellSize(profile.grid, stageBox());
+  ui.profileNote.textContent = describeProfile(profile, cellPx);
+  ui.profileNote.classList.toggle('bad', cellPx < profile.minCellPx);
 }
 
 /** Starts painting. */
@@ -138,6 +190,26 @@ async function start() {
 
   const box = stageBox();
   const cellPx = fitCellSize(profile.grid, box);
+
+  // Refuse rather than paint something unreadable. A code drawn below the floor
+  // looks entirely normal on the screen and to the person filming it; the only
+  // sign is a receiver that never finishes, which is a long way from the cause.
+  // If a sparser profile fits, this is the user's choice to correct; if none
+  // does, the screen is simply too small and no choice here changes that.
+  if (cellPx < profile.minCellPx) {
+    const alternative = PROFILES.find((other) => fitsOnScreen(other, box));
+    ui.stage.classList.remove('showing');
+    await exitFullscreen();
+    say(
+      alternative
+        ? `${profile.name} draws ${cellPx}-pixel cells on this screen and a camera ` +
+          `cannot read the shapes below ${profile.minCellPx}. Choose ${alternative.name} and start again.`
+        : `This screen draws ${cellPx}-pixel cells even at ${PROFILES[0].name}, and a ` +
+          `camera cannot read the shapes below ${PROFILES[0].minCellPx}. Send from a larger display.`,
+      'bad',
+    );
+    return;
+  }
 
   let emitter;
   try {
@@ -262,6 +334,16 @@ function stop() {
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
 }
 
+/** Leaves fullscreen, so that a message written on the page can be read. */
+async function exitFullscreen() {
+  if (!document.fullscreenElement) return;
+  try {
+    await document.exitFullscreen();
+  } catch {
+    // Nothing to do about it, and the message is still on the page underneath.
+  }
+}
+
 async function enterFullscreen() {
   try {
     await ui.stage.requestFullscreen({ navigationUI: 'hide' });
@@ -327,17 +409,27 @@ document.addEventListener('fullscreenchange', () => {
   if (!document.fullscreenElement && running) stop();
 });
 
+// Which profiles fit is a property of the window, and the window changes: a
+// laptop that could not draw P2-standard in half a screen can in a whole one,
+// and a rotated phone changes its shortest side entirely.
+window.addEventListener('resize', () => {
+  if (running || !PROFILES.length) return;
+  refreshProfileOptions();
+  refreshProfileNote();
+});
+
 try {
   await init();
   PROFILES = JSON.parse(profiles());
 
-  for (const profile of PROFILES) {
-    const option = document.createElement('option');
-    option.textContent = profile.name;
-    ui.profile.append(option);
+  for (let index = 0; index < PROFILES.length; index += 1) {
+    ui.profile.append(document.createElement('option'));
   }
-  // P2-standard is the default the specification names.
-  ui.profile.selectedIndex = Math.min(1, PROFILES.length - 1);
+  refreshProfileOptions();
+  // The densest profile this screen can draw legibly, rather than the one the
+  // specification names as standard. P2-standard is the right default for a
+  // screen that can carry it and is silently unreadable on one that cannot.
+  ui.profile.selectedIndex = bestProfile(stageBox());
   refreshProfileNote();
   refreshHoldNote();
 } catch (error) {
