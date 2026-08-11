@@ -46,6 +46,16 @@ cast_precision_loss = "allow"
 # written with `get` by hand.
 # indexing_slicing = "warn"
 
+# The test suite runs the codec and the detector over megapixel images. Left
+# unoptimised those are minutes of work rather than seconds, and a suite nobody
+# wants to wait for is a suite that stops being run. Debug assertions and
+# overflow checks stay on, which is the part that actually catches bugs.
+[profile.test]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 2
+
 [profile.release]
 opt-level = 3
 lto = "thin"
