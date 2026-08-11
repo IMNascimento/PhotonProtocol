@@ -62,6 +62,7 @@ pub(crate) fn run(
     output: &Path,
     profile: Option<ProfileId>,
     max_frames: Option<usize>,
+    debug_dir: Option<&Path>,
 ) -> Result<(), String> {
     let scratch = std::env::temp_dir().join(format!("photon-decode-{}", std::process::id()));
     let (frames, timing) = gather_frames(input, &scratch, max_frames)?;
@@ -77,6 +78,10 @@ pub(crate) fn run(
     println!();
 
     let receiver = profile.map_or_else(Receiver::new, Receiver::for_profile);
+
+    if let Some(directory) = debug_dir {
+        write_rectified(&frames, directory)?;
+    }
 
     // Reading a frame is the expensive half and depends on nothing else, so it
     // runs across every core. Folding the readings in has to happen in order,
@@ -219,6 +224,41 @@ fn print_advice(tally: &Tally) {
 
     println!("This is the kind of failure more filming fixes. Fill more of the");
     println!("frame with the screen, hold steadier, and keep recording longer.");
+}
+
+/// Writes each frame as the decoder sees it: located, de-warped, one cell at a
+/// fixed size.
+///
+/// Counters describe a failure; this shows it. A transform that is off by a
+/// fraction of a cell, or by a whole one, or that has locked onto something
+/// that is not the code, all produce numbers that look broadly similar and
+/// pictures that do not.
+fn write_rectified(frames: &[std::path::PathBuf], directory: &Path) -> Result<(), String> {
+    use photon_core::FrameLayout;
+    use photon_core::detect::Detector;
+
+    std::fs::create_dir_all(directory)
+        .map_err(|e| format!("cannot create {}: {e}", directory.display()))?;
+
+    let detector = Detector::new();
+    let mut written = 0usize;
+
+    for (index, path) in frames.iter().enumerate().take(24) {
+        let Ok(image) = media::read_image(path) else { continue };
+        let Ok(detection) = detector.detect(&image) else { continue };
+
+        let layout = FrameLayout::new(detection.profile.profile());
+        let rectified = layout.rectify(&image, &detection.transform, 8);
+        let target = directory.join(format!("rectified-{index:03}.png"));
+        media::write_png(&target, &rectified).map_err(|e| e.to_string())?;
+        written += 1;
+    }
+
+    println!("Debug           {written} rectified frames in {}", directory.display());
+    println!("                Each should look like the code that was sent. If it does");
+    println!("                not, the fault is in locating the frame, not in reading it.");
+    println!();
+    Ok(())
 }
 
 /// Collects the frames to decode, extracting them if the input is a video.

@@ -81,6 +81,11 @@ enum Command {
         /// Stop after this many frames.
         #[arg(long)]
         max_frames: Option<usize>,
+        /// Write what the decoder saw into this directory: the code area with
+        /// its perspective undone, one picture per frame. If the sampling grid
+        /// is landing in the wrong place, that is visible here and nowhere else.
+        #[arg(long)]
+        debug_dir: Option<PathBuf>,
     },
 
     /// List the physical-layer profiles and their derived geometry.
@@ -119,8 +124,8 @@ fn main() -> ExitCode {
             let target = out.unwrap_or_else(|| encode::default_output(&input));
             encode::run(&input, &target, profile.into(), cell_px, passes, fps, video)
         }
-        Command::Decode { input, out, profile, max_frames } => {
-            decode::run(&input, &out, profile.map(Into::into), max_frames)
+        Command::Decode { input, out, profile, max_frames, debug_dir } => {
+            decode::run(&input, &out, profile.map(Into::into), max_frames, debug_dir.as_deref())
         }
         Command::Profiles => {
             print_profiles();

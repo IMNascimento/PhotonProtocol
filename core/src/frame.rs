@@ -335,6 +335,48 @@ impl FrameLayout {
         Rgbf::new(sum.r / n, sum.g / n, sum.b / n)
     }
 
+    /// Redraws the code area as the decoder sees it, one cell at a fixed size.
+    ///
+    /// A picture of what the sampling grid landed on, with the perspective
+    /// undone. If the transform is right this comes out looking like the frame
+    /// that was painted; if it is off by a fraction of a cell, or by a whole
+    /// one, or is the wrong size entirely, that is immediately visible — and
+    /// visible in a way no counter conveys.
+    ///
+    /// Reads through the same sampler as decoding, so what it shows is what the
+    /// classifier was given rather than a second opinion about it.
+    #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "channels are clamped to [0, 1] immediately before scaling to a byte"
+    )]
+    pub fn rectify(&self, image: &RgbImage, transform: &Homography, cell_px: u32) -> RgbImage {
+        let grid = self.grid();
+        let mut out = RgbImage::filled(grid * cell_px, grid * cell_px, Rgb::BLACK);
+        let sub_px = (cell_px / SHAPE_GRID).max(1);
+
+        for row in 0..grid {
+            for col in 0..grid {
+                let sample = self.sample_cell(image, transform, row * grid + col);
+                for y in 0..SHAPE_GRID {
+                    for x in 0..SHAPE_GRID {
+                        let value = sample.sub[(y * SHAPE_GRID + x) as usize];
+                        let to_byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u8;
+                        out.fill_rect(
+                            col * cell_px + x * sub_px,
+                            row * cell_px + y * sub_px,
+                            sub_px,
+                            sub_px,
+                            Rgb::new(to_byte(value.r), to_byte(value.g), to_byte(value.b)),
+                        );
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// The homography mapping cell space onto a frame this layout rendered.
     ///
     /// Useful on its own for tests and for the channel simulator, which needs to
