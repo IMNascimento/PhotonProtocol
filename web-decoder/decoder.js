@@ -37,6 +37,8 @@ const ui = {
     frames: document.getElementById('fact-frames'),
     used: document.getElementById('fact-used'),
     missed: document.getElementById('fact-missed'),
+    straddled: document.getElementById('fact-straddled'),
+    damaged: document.getElementById('fact-damaged'),
     doubtful: document.getElementById('fact-doubtful'),
     name: document.getElementById('fact-name'),
   },
@@ -96,9 +98,12 @@ async function start() {
     frames: 0,
     used: 0,
     missed: 0,
+    straddled: 0,
+    damaged: 0,
     doubtfulTotal: 0,
     doubtfulFrames: 0,
     perCell: null,
+    diagnosis: null,
     busy: false,
     finished: false,
     url: null,
@@ -145,21 +150,41 @@ function onWorkerMessage(event) {
 }
 
 function applyReport(report) {
-  if (report.outcome === 'notLocated') {
-    session.missed += 1;
-  } else if (report.outcome === 'decoded') {
-    session.used += 1;
-    session.doubtfulTotal += report.doubtfulRate;
-    session.doubtfulFrames += 1;
+  // Every outcome is counted. Showing only "found" and "not found" left the
+  // most common real failure invisible: hundreds of frames located, none used,
+  // and nothing on screen to say what had happened to them.
+  switch (report.outcome) {
+    case 'notLocated':
+      session.missed += 1;
+      break;
+    case 'straddled':
+      session.straddled += 1;
+      break;
+    case 'headerUnreadable':
+    case 'payloadUnrecoverable':
+      session.damaged += 1;
+      break;
+    case 'decoded':
+      session.used += 1;
+      session.doubtfulTotal += report.doubtfulRate;
+      session.doubtfulFrames += 1;
+      break;
+    default:
+      break;
   }
 
   if (typeof report.pixelsPerCell === 'number') {
     session.perCell = report.pixelsPerCell;
     ui.facts.perCell.textContent = report.pixelsPerCell.toFixed(1);
   }
+  if (report.diagnosis) {
+    session.diagnosis = report.diagnosis;
+  }
 
   ui.facts.used.textContent = String(session.used);
   ui.facts.missed.textContent = String(session.missed);
+  ui.facts.straddled.textContent = String(session.straddled);
+  ui.facts.damaged.textContent = String(session.damaged);
 
   if (report.needed > 0) {
     ui.bar.max = report.needed;
@@ -182,6 +207,15 @@ function applyReport(report) {
  * fix, and because it is the only one they can change by moving.
  */
 function updateAim() {
+  // Frames caught mid-change come first: it is the one failure that is entirely
+  // the sending device's to fix, and no amount of aiming or waiting helps.
+  if (session.straddled > 4 && session.straddled > session.used) {
+    ui.aim.textContent =
+      `${session.straddled} pictures caught two codes at once — the sending ` +
+      'screen is changing faster than this camera can capture a whole one. ' +
+      'Raise "hold each code" on the sending device. Nothing here will fix it.';
+    return;
+  }
   if (session.perCell !== null && session.perCell < MINIMUM_PIXELS_PER_CELL) {
     ui.aim.textContent =
       `Only ${session.perCell.toFixed(1)} camera pixels per cell — too few for the ` +
@@ -189,9 +223,21 @@ function updateAim() {
     return;
   }
   if (session.frames > 12 && session.used === 0) {
-    ui.aim.textContent =
-      'The code has not been found yet. Get the whole of the other screen in ' +
-      'shot, hold steadier, and keep glare off it.';
+    const found = session.diagnosis?.finderCandidates ?? 0;
+    if (found === 0) {
+      ui.aim.textContent =
+        'No part of a code is visible yet. Point the camera at the sending ' +
+        'screen, get closer, and keep the whole of it in shot.';
+    } else if (!session.diagnosis?.quadFound) {
+      ui.aim.textContent =
+        `Seeing ${found} of the four corner patterns. Usually that means part ` +
+        'of the code is out of shot or cut off at the edge of the sending ' +
+        'screen — check the whole code is visible there, and get all of it in frame.';
+    } else {
+      ui.aim.textContent =
+        'The corners are visible but the frame is not readable. Hold steadier, ' +
+        'move any glare off the screen, and get closer.';
+    }
     return;
   }
   if (session.used > 0) {
@@ -312,8 +358,17 @@ function grab(element) {
   session.frames += 1;
   ui.facts.frames.textContent = String(session.frames);
 
+  // Ask for a diagnosis every so often, but only while nothing has worked yet.
+  const diagnose = session.used === 0 && session.frames % 15 === 0;
+
   worker.postMessage(
-    { type: 'frame', buffer, width: ui.grabber.width, height: ui.grabber.height },
+    {
+      type: 'frame',
+      buffer,
+      width: ui.grabber.width,
+      height: ui.grabber.height,
+      diagnose,
+    },
     [buffer],
   );
 }

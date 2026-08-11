@@ -242,6 +242,14 @@ impl Transmitter {
 pub enum FrameOutcome {
     /// No code area could be located in the image at all.
     NotLocated,
+    /// The picture caught two different codes at once.
+    ///
+    /// The header is carried at both edges, so a camera that opened its shutter
+    /// across a screen refresh produces two copies that disagree. The payload
+    /// between them is half of one code and half of the next, which no amount
+    /// of error correction repairs — but the disagreement itself is a precise
+    /// diagnosis, and the fix is on the sending device.
+    Straddled,
     /// The frame was read and its units were taken.
     Decoded,
     /// The frame belongs to this session but has already been seen.
@@ -694,17 +702,23 @@ impl Receiver {
     }
 }
 
-/// Reads whichever copy of the header survives.
-fn read_header(
+/// Reads both copies of the header.
+///
+/// Both, not the first that works. The copies sit at opposite edges of the
+/// frame, and a camera whose shutter spanned a screen refresh will have caught
+/// a different code at each end. When they disagree the payload between them is
+/// a splice of two codes and is not worth decoding — and, far more usefully,
+/// the disagreement says exactly what is wrong and where to fix it.
+fn read_headers(
     layout: &FrameLayout,
     image: &RgbImage,
     transform: &Homography,
-) -> Option<FrameHeader> {
+) -> [Option<FrameHeader>; 2] {
     let codeword_len = layout.profile().header_codeword_len() as usize;
     let (dark, light) = timing_levels(layout, image, transform);
     let threshold = f32::midpoint(dark, light);
 
-    for band in 0..2 {
+    core::array::from_fn(|band| {
         let cells = layout.header_band(band);
         let mut bytes = vec![0u8; codeword_len];
         for (index, &cell) in cells.iter().take(codeword_len * 8).enumerate() {
@@ -713,11 +727,8 @@ fn read_header(
                 bytes[index / 8] |= 1 << (7 - index % 8);
             }
         }
-        if let Ok(header) = FrameHeader::decode_codeword(&bytes, &[]) {
-            return Some(header);
-        }
-    }
-    None
+        FrameHeader::decode_codeword(&bytes, &[]).ok()
+    })
 }
 
 /// Black and white levels measured from this frame's timing ring.
@@ -797,9 +808,21 @@ fn read_frame(candidate: &Candidate, image: &RgbImage, transform: &Homography) -
         pixels_per_cell: None,
     };
 
-    let Some(header) = read_header(layout, image, transform) else {
+    let headers = read_headers(layout, image, transform);
+    let Some(header) = headers[0].or(headers[1]) else {
         return reading;
     };
+
+    // Two readable copies that name different frames mean the shutter caught a
+    // screen refresh. The payload between them is a splice; decoding it would
+    // burn the frame's error correction on damage that is not random.
+    if let (Some(top), Some(bottom)) = (headers[0], headers[1])
+        && top.frame_seq != bottom.frame_seq
+    {
+        reading.header = Some(header);
+        reading.outcome = FrameOutcome::Straddled;
+        return reading;
+    }
     // A header that names a different profile means this candidate's geometry
     // happened to produce a readable header for someone else's frame. Believing
     // it would decode the payload against the wrong cell map.

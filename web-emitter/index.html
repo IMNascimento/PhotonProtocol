@@ -26,12 +26,16 @@
   <select id="profile"></select>
   <p class="note" id="profile-note"></p>
 
-  <label for="hold">Hold each code for <span id="hold-value">2</span> display refreshes</label>
-  <input type="range" id="hold" min="2" max="6" step="1" value="2">
+  <label for="hold">Hold each code for <span id="hold-value">4</span> display refreshes</label>
+  <input type="range" id="hold" min="2" max="10" step="1" value="4">
+  <p class="note" id="hold-note"></p>
   <p class="note">
-    Two is the minimum the format allows and the fastest setting. Raise it if
-    the receiving camera is recording at a lower frame rate than this screen
-    refreshes, or if the recording comes out smeared.
+    A camera whose shutter opens while this screen is changing records half of
+    one code and half of the next, and half a code is worth nothing. Holding
+    each one for longer is what prevents that. Two is the fastest the format
+    allows and only works when the camera is fast and well matched; four is a
+    safe default for a phone filming a monitor. Raise it further if the
+    receiving page reports pictures caught mid-change.
   </p>
 </fieldset>
 

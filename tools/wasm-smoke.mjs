@@ -111,6 +111,12 @@ try {
 }
 check(refused, 'a mis-sized frame buffer is refused');
 
+console.log('diagnosing a picture with no code in it');
+const blank = new Uint8Array(200 * 200 * 4).fill(0xff);
+const diagnosis = JSON.parse(photon.inspectFrame(blank, 200, 200));
+check(diagnosis.located === false, 'a blank picture is not located');
+check(diagnosis.pixelsPerCell === null, 'and reports no measurement');
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);

@@ -196,6 +196,37 @@ impl Detector {
     }
 }
 
+/// How far detection got on a picture that did not yield a frame.
+///
+/// "Not found" is a dead end for anyone holding a camera. These numbers say
+/// which half of the search failed, which is the difference between *the code
+/// is not in shot or is too blurred to resolve* and *the code is in shot but
+/// what I am looking at is not a whole one* — a clipped display, most often,
+/// which looks entirely correct to the person in front of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Diagnosis {
+    /// Corner patterns that survived verification.
+    pub finder_candidates: usize,
+    /// Whether four of them formed a plausible quadrilateral.
+    pub quad_found: bool,
+}
+
+impl Detector {
+    /// Reports how far a failed detection got.
+    ///
+    /// Costs the same as a detection, so it is meant to be run occasionally on
+    /// a preview rather than on every frame.
+    #[must_use]
+    pub fn diagnose(&self, image: &RgbImage) -> Diagnosis {
+        let binary = Binary::from_image(image);
+        let candidates = find_finders(&binary);
+        Diagnosis {
+            finder_candidates: candidates.len(),
+            quad_found: select_quad(&candidates).is_some(),
+        }
+    }
+}
+
 /// Rotates a corner list by `steps` positions.
 fn rotate(corners: [Point; 4], steps: usize) -> [Point; 4] {
     core::array::from_fn(|i| corners[(i + steps) % 4])

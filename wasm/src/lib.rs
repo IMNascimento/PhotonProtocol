@@ -226,6 +226,7 @@ impl Receiver {
 
         let outcome = match report.outcome {
             FrameOutcome::NotLocated => "notLocated",
+            FrameOutcome::Straddled => "straddled",
             FrameOutcome::Decoded => "decoded",
             FrameOutcome::Duplicate => "duplicate",
             FrameOutcome::WrongSession => "wrongSession",
@@ -284,20 +285,30 @@ impl Receiver {
     }
 }
 
-/// Whether a picture contains a locatable frame, without decoding it.
+/// Reports how far detection gets on a picture, as JSON.
 ///
-/// Cheap enough to run on a preview, and useful for telling someone their aim is
-/// wrong while they can still do something about it.
+/// For telling someone why nothing is being read while they can still do
+/// something about it. "Not found" on its own sends people to adjust the wrong
+/// thing: corner patterns found but no whole frame usually means the display is
+/// clipped, which looks perfectly fine from in front of it.
 ///
 /// # Errors
 ///
-/// Returns a message if the buffer does not match the stated dimensions, or if
-/// the profile is one this build does not implement.
-#[wasm_bindgen(js_name = locateFrame)]
-pub fn locate_frame(rgba: &[u8], width: u32, height: u32, profile: u8) -> Result<bool, JsValue> {
+/// Returns a message if the buffer does not match the stated dimensions.
+#[wasm_bindgen(js_name = inspectFrame)]
+pub fn inspect_frame(rgba: &[u8], width: u32, height: u32) -> Result<String, JsValue> {
     let image = rgba_to_rgb(rgba, width, height).map_err(to_js)?;
-    let detector = Detector::for_profile(profile_from(profile).map_err(to_js)?);
-    Ok(detector.detect(&image).is_ok())
+    let detector = Detector::new();
+    let found = detector.detect(&image).ok();
+    let diagnosis = detector.diagnose(&image);
+
+    Ok(format!(
+        r#"{{"located":{},"finderCandidates":{},"quadFound":{},"pixelsPerCell":{}}}"#,
+        found.is_some(),
+        diagnosis.finder_candidates,
+        diagnosis.quad_found,
+        found.map_or_else(|| "null".to_owned(), |d| format!("{:.2}", d.pixels_per_cell())),
+    ))
 }
 
 /// Drops the alpha a canvas insists on carrying.

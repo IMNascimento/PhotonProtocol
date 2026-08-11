@@ -22,6 +22,7 @@ struct Tally {
     header_unreadable: usize,
     payload_lost: usize,
     wrong_session: usize,
+    straddled: usize,
     duplicate: usize,
     decoded: usize,
     new_symbols: usize,
@@ -113,6 +114,7 @@ pub(crate) fn run(
 
         match report.outcome {
             FrameOutcome::NotLocated => tally.not_located += 1,
+            FrameOutcome::Straddled => tally.straddled += 1,
             FrameOutcome::HeaderUnreadable => tally.header_unreadable += 1,
             FrameOutcome::PayloadUnrecoverable => tally.payload_lost += 1,
             FrameOutcome::WrongSession => tally.wrong_session += 1,
@@ -155,7 +157,14 @@ pub(crate) fn run(
             println!("                {error}");
             if error.is_recoverable_by_more_capture() {
                 println!();
-                if tally.located > 0 && tally.pixels_per_cell() < 5.0 {
+                if tally.straddled > tally.decoded {
+                    println!(
+                        "{} frames caught two codes at once. The sending screen is changing",
+                        tally.straddled
+                    );
+                    println!("faster than this camera can capture a whole one. Hold each code for");
+                    println!("longer on the sending device and film it again.");
+                } else if tally.located > 0 && tally.pixels_per_cell() < 5.0 {
                     println!(
                         "At {:.1} pixels per cell the screen was too small in the shot for the",
                         tally.pixels_per_cell()
@@ -200,6 +209,7 @@ fn print_frame_report(tally: &Tally) {
     println!("{:<16}{:>8}", "not located", tally.not_located);
     println!("{:<16}{:>8}", "header lost", tally.header_unreadable);
     println!("{:<16}{:>8}", "payload lost", tally.payload_lost);
+    println!("{:<16}{:>8}", "two at once", tally.straddled);
     println!("{:<16}{:>8}", "other session", tally.wrong_session);
     println!();
     if tally.located > 0 {

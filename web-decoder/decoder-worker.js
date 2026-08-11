@@ -5,7 +5,7 @@
 // the main thread that is a page which stops responding; here it is a page that
 // keeps drawing progress while the work goes on.
 
-import init, { Receiver } from '../photon/photon_wasm.js';
+import init, { Receiver, inspectFrame } from '../photon/photon_wasm.js';
 
 let receiver = null;
 
@@ -27,6 +27,14 @@ self.onmessage = async (event) => {
         if (!receiver) return;
         const rgba = new Uint8Array(message.buffer);
         const report = JSON.parse(receiver.acceptFrame(rgba, message.width, message.height));
+
+        // When nothing is being found, occasionally ask why. It costs another
+        // detection pass, so it is only worth doing while the answer would
+        // change what the person watching should do.
+        if (message.diagnose && report.outcome === 'notLocated') {
+          report.diagnosis = JSON.parse(inspectFrame(rgba, message.width, message.height));
+        }
+
         self.postMessage({ type: 'report', report, index: message.index });
 
         if (report.complete) {

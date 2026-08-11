@@ -105,6 +105,51 @@ fn seeing_only_a_fraction_of_the_frames_still_completes() {
 }
 
 #[test]
+fn a_frame_spliced_from_two_codes_is_named_as_one() {
+    // What a phone filming a monitor produces most of the time: the shutter
+    // opens across a screen refresh, so the top of the picture is one code and
+    // the bottom is the next. The payload is a splice and cannot be repaired --
+    // but the two header copies sit at opposite edges and disagree, which says
+    // precisely what happened and that the fix is on the sending device.
+    //
+    // Before this was recognised the symptom was frames located in their
+    // hundreds, none of them used, and nothing on screen to say why.
+    use photon_core::{Rgb, RgbImage};
+
+    let source = file(30_000);
+    let profile = ProfileId::P2Standard;
+    let mut tx = Transmitter::new("torn.bin", &source, profile, 0x7EA).expect("prepared");
+
+    let first = tx.next_frame(8).expect("painted");
+    let second = tx.next_frame(8).expect("painted");
+    assert_eq!(first.image.width(), second.image.width());
+
+    // Take the top half from one code and the bottom half from the next.
+    let side = first.image.width();
+    let mut spliced = RgbImage::filled(side, side, Rgb::BLACK);
+    for y in 0..side {
+        let source_image = if y < side / 2 { &first.image } else { &second.image };
+        for x in 0..side {
+            spliced.set(x, y, source_image.get(x, y));
+        }
+    }
+
+    let mut rx = Receiver::new();
+    let report = rx.accept_image(&spliced);
+
+    assert_eq!(
+        report.outcome,
+        FrameOutcome::Straddled,
+        "a spliced frame must be recognised, not silently discarded"
+    );
+    assert_eq!(report.new_symbols, 0, "nothing from a spliced frame may be believed");
+
+    // And an unspliced frame from the same sender still reads normally.
+    let clean = tx.next_frame(8).expect("painted");
+    assert_eq!(rx.accept_image(&clean.image).outcome, FrameOutcome::Decoded);
+}
+
+#[test]
 fn a_failure_says_which_stage_gave_up() {
     // The fault that made the other two impossible to diagnose: every one of
     // these used to report "no readable manifest was captured", which describes

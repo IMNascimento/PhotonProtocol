@@ -46,33 +46,68 @@ function bytes(count) {
   return `${(count / 1024 / 1024).toFixed(2)} MB`;
 }
 
+/** Cells of white margin the format puts around the code area. */
+const QUIET_ZONE_CELLS = 4;
+
 /**
- * The largest whole number of device pixels per cell that still fits the screen.
+ * Fraction of the available box to fill.
  *
- * The code has to arrive at the camera as pixels, not as a resampled
- * approximation of pixels, so the cell size is chosen to divide the display
- * exactly rather than to fill it exactly. Filling the last few percent by
- * scaling would undo the point.
+ * The last couple of percent is not worth having. Browser chrome appears and
+ * disappears, fullscreen settles a frame late, and rounding goes whichever way
+ * it goes — and if any of that clips an edge, it clips a corner pattern, and a
+ * code with a missing corner is not a code at all. It fails invisibly, too: the
+ * screen still looks right to a person holding a camera at it.
  */
-function fitCellSize(grid) {
-  const quiet = 4;
-  const cells = grid + 2 * quiet;
+const FIT_MARGIN = 0.96;
+
+/**
+ * The largest whole number of device pixels per cell that fits a given box.
+ *
+ * `box` is measured in CSS pixels from the element the code will actually be
+ * drawn in — not from `window.screen`, which on a desktop is the monitor rather
+ * than the window, and produced a code larger than the space available for it.
+ *
+ * Whole pixels per cell, because the code has to reach the camera as pixels
+ * rather than as a resampled approximation of pixels. Filling the remaining
+ * fraction by scaling would undo the point of drawing it carefully.
+ */
+function fitCellSize(grid, box) {
+  const cells = grid + 2 * QUIET_ZONE_CELLS;
   const ratio = window.devicePixelRatio || 1;
-  const shortest = Math.min(window.screen.width, window.screen.height) * ratio;
+  const shortest = Math.min(box.width, box.height) * ratio * FIT_MARGIN;
   return Math.max(3, Math.floor(shortest / cells));
 }
 
+/** The box the code will be drawn into, in CSS pixels. */
+function stageBox() {
+  const rect = ui.stage.getBoundingClientRect();
+  if (rect.width > 1 && rect.height > 1) {
+    return { width: rect.width, height: rect.height };
+  }
+  // The stage is still hidden, so fall back to the viewport. Also the right
+  // answer for the estimate shown before anything starts.
+  return { width: window.innerWidth, height: window.innerHeight };
+}
+
+/** Waits for layout to settle after a fullscreen change. */
+function nextFrame() {
+  return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+}
+
 function describeProfile(profile, cellPx) {
-  const side = (profile.grid + 8) * cellPx;
+  const side = (profile.grid + 2 * QUIET_ZONE_CELLS) * cellPx;
+  const advice = cellPx < 6
+    ? ' That is small — on a screen this size a more conservative profile draws bigger cells.'
+    : '';
   return `${profile.grid}×${profile.grid} cells at ${profile.bitsPerCell} bits, ` +
-    `${profile.payloadCapacity} bytes per frame. ` +
-    `At ${cellPx} device pixels per cell the code is ${side}×${side}.`;
+    `${profile.payloadCapacity} bytes per frame. On this display that is ` +
+    `${cellPx} pixels per cell and a code of ${side}×${side} pixels.${advice}`;
 }
 
 function refreshProfileNote() {
   const profile = PROFILES[ui.profile.selectedIndex];
   if (!profile) return;
-  ui.profileNote.textContent = describeProfile(profile, fitCellSize(profile.grid));
+  ui.profileNote.textContent = describeProfile(profile, fitCellSize(profile.grid, stageBox()));
 }
 
 /** Starts painting. */
@@ -81,7 +116,16 @@ async function start() {
   if (!file) return;
 
   const profile = PROFILES[ui.profile.selectedIndex];
-  const cellPx = fitCellSize(profile.grid);
+
+  // Show the stage and go fullscreen *before* measuring. The box the code has
+  // to fit is the one it will actually be drawn in, and that box is not known
+  // until the browser has finished changing its mind about window chrome.
+  ui.stage.classList.add('showing');
+  await enterFullscreen();
+  await nextFrame();
+
+  const box = stageBox();
+  const cellPx = fitCellSize(profile.grid, box);
 
   let emitter;
   try {
@@ -91,6 +135,7 @@ async function start() {
     const session = crypto.getRandomValues(new Uint32Array(1))[0];
     emitter = new Emitter(file.name, buffer, profile.id, cellPx, session);
   } catch (error) {
+    ui.stage.classList.remove('showing');
     say(`This file cannot be sent: ${error}`, 'bad');
     return;
   }
@@ -115,14 +160,26 @@ async function start() {
   const context = ui.canvas.getContext('2d', { alpha: false, willReadFrequently: false });
   context.imageSmoothingEnabled = false;
 
-  ui.stage.classList.add('showing');
-  await enterFullscreen();
+  // If this ever fails the code is being clipped, which removes the corner
+  // patterns and makes the frame unreadable while still looking fine.
+  if (cssSide > box.width + 1 || cssSide > box.height + 1) {
+    stop();
+    say(
+      `The code needs ${Math.ceil(cssSide)} pixels and only ${Math.floor(
+        Math.min(box.width, box.height),
+      )} are available. Use a larger window, or a more conservative profile.`,
+      'bad',
+    );
+    return;
+  }
+
   await keepAwake();
 
   running = {
     emitter,
     context,
     side,
+    cellPx,
     hold: Number(ui.hold.value),
     ticks: 0,
     frames: 0,
@@ -159,7 +216,8 @@ function paint() {
 
   running.frames += 1;
   const pass = Math.floor(running.frames / Math.max(1, running.perPass)) + 1;
-  ui.stageStatus.textContent = `frame ${running.frames} · pass ${pass} · keep recording`;
+  ui.stageStatus.textContent =
+    `${running.side}px · ${running.cellPx}px per cell · frame ${running.frames} · pass ${pass}`;
 }
 
 function stop() {
@@ -198,8 +256,21 @@ function releaseWake() {
   wakeLock = null;
 }
 
+/** Says what the hold setting means in codes per second. */
+function refreshHoldNote() {
+  const note = document.getElementById('hold-note');
+  if (!note) return;
+  const hold = Number(ui.hold.value);
+  // Most displays are 60 Hz; the exact figure only shifts the estimate.
+  const rate = 60 / hold;
+  note.textContent =
+    `About ${rate.toFixed(0)} codes per second. A camera recording at 30 frames ` +
+    `per second needs the codes to change slower than that to catch whole ones.`;
+}
+
 ui.hold.addEventListener('input', () => {
   ui.holdValue.textContent = ui.hold.value;
+  refreshHoldNote();
   if (running) running.hold = Number(ui.hold.value);
 });
 
@@ -226,6 +297,7 @@ try {
   // P2-standard is the default the specification names.
   ui.profile.selectedIndex = Math.min(1, PROFILES.length - 1);
   refreshProfileNote();
+  refreshHoldNote();
 } catch (error) {
   say(`The protocol module failed to load: ${error}`, 'bad');
   ui.start.disabled = true;
