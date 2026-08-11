@@ -16,6 +16,20 @@ Drafts are not interoperable with one another.
 
 ## [Unreleased]
 
+### Added
+
+- Camera pixels per cell is measured from the detected frame and reported
+  everywhere: per frame by the receiver, averaged by `photon decode`, and live
+  on the receiving page. It is the measurement `SPEC.md` Q1 asks for, and the
+  only failure that filming longer does not fix.
+- The receiving page can read from the camera directly instead of from a saved
+  recording. The project's brief excluded this from version 1 because
+  `getUserMedia` yields less resolution than a camera app; the objection is now
+  measured rather than argued, with the page showing pixels per cell as it
+  reads and saying plainly when there are too few.
+
+Not yet validated against a real camera — see the status table in the README.
+
 ## [0.3.0] — 2026-08-11
 
 Phases 2, 3 and 4. There is now something to point a camera at, and something
