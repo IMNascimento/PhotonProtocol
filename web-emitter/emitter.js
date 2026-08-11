@@ -28,6 +28,18 @@ const ui = {
   },
 };
 
+/**
+ * Whether to send painted frames back to the server that served this page.
+ *
+ * Off unless the address says `?capture`. What is being drawn is the other half
+ * of any question about what is being read, and until both halves are on disk
+ * together the answer is guesswork.
+ */
+const CAPTURING = new URLSearchParams(location.search).has('capture');
+
+/** How many painted frames to keep. One pass is plenty. */
+const CAPTURE_LIMIT = 12;
+
 /** Profile descriptions, as the protocol reports them. */
 let PROFILES = [];
 
@@ -214,10 +226,30 @@ function paint() {
   const picture = new ImageData(new Uint8ClampedArray(rgba), running.side, running.side);
   running.context.putImageData(picture, 0, 0);
 
+  if (CAPTURING && running.frames < CAPTURE_LIMIT) {
+    sendPainted(running);
+  }
+
   running.frames += 1;
   const pass = Math.floor(running.frames / Math.max(1, running.perPass)) + 1;
   ui.stageStatus.textContent =
     `${running.side}px · ${running.cellPx}px per cell · frame ${running.frames} · pass ${pass}`;
+}
+
+/** Sends one painted frame to the development server. */
+function sendPainted(state) {
+  const query = new URLSearchParams({
+    kind: 'sent',
+    outcome: `frame${String(state.frames).padStart(3, '0')}`,
+    report: JSON.stringify({ side: state.side, cellPx: state.cellPx, frame: state.frames }),
+  });
+
+  ui.canvas.toBlob((blob) => {
+    if (!blob) return;
+    fetch(`/capture?${query}`, { method: 'POST', body: blob }).catch(() => {
+      // Nothing about the emission depends on this landing.
+    });
+  }, 'image/png');
 }
 
 function stop() {
@@ -266,6 +298,16 @@ function refreshHoldNote() {
   note.textContent =
     `About ${rate.toFixed(0)} codes per second. A camera recording at 30 frames ` +
     `per second needs the codes to change slower than that to catch whole ones.`;
+}
+
+if (CAPTURING) {
+  const banner = document.createElement('div');
+  banner.className = 'status bad';
+  banner.textContent =
+    `Diagnostic capture is ON. The first ${CAPTURE_LIMIT} painted frames will be sent to ` +
+    `${location.origin}, which is the server that served this page. Remove ` +
+    '"?capture" from the address to turn it off.';
+  document.body.prepend(banner);
 }
 
 ui.hold.addEventListener('input', () => {

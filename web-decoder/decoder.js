@@ -60,6 +60,21 @@ const PLAYBACK_RATE = 4;
  */
 const MINIMUM_PIXELS_PER_CELL = 5;
 
+/**
+ * Whether to send unreadable pictures back to the server that served this page.
+ *
+ * Off unless the address says `?capture`, and deliberately so. This page tells
+ * people nothing is uploaded, and that has to stay true by default — a
+ * diagnostic that turns itself on quietly would make the promise a lie. The
+ * development server is the only thing that accepts these; the deployed pages
+ * have nowhere to send them.
+ */
+const CAPTURING = new URLSearchParams(location.search).has('capture');
+
+/** Longest run of pictures to send, and the gap between them. */
+const CAPTURE_LIMIT = 40;
+const CAPTURE_INTERVAL_MS = 700;
+
 let PROFILES = [];
 let worker = null;
 let session = null;
@@ -110,6 +125,9 @@ async function start() {
     doubtfulFrames: 0,
     perCell: null,
     diagnosis: null,
+    pending: null,
+    captured: 0,
+    lastCapture: 0,
     busy: false,
     finished: false,
     url: null,
@@ -139,6 +157,7 @@ function onWorkerMessage(event) {
     case 'report':
       session.busy = false;
       applyReport(message.report);
+      sendCapture(message.report);
       break;
 
     case 'done':
@@ -290,6 +309,38 @@ function updateAim() {
   }
 }
 
+/**
+ * Sends one picture, and what the decoder made of it, to the development
+ * server.
+ *
+ * Only pictures that failed. A picture that decoded needs no explaining, and
+ * the point of this is to put the actual frames in front of whoever is trying
+ * to work out why the others did not.
+ */
+async function sendCapture(report) {
+  if (!CAPTURING || !session.pending) return;
+
+  const blob = await session.pending;
+  session.pending = null;
+  if (!blob || report.outcome === 'decoded' || session.captured >= CAPTURE_LIMIT) return;
+
+  session.captured += 1;
+  const query = new URLSearchParams({
+    outcome: report.outcome,
+    report: JSON.stringify(report),
+  });
+
+  try {
+    await fetch(`/capture?${query}`, { method: 'POST', body: blob });
+    ui.aim.textContent =
+      `Diagnostic capture on — ${session.captured} picture(s) sent to the server ` +
+      'this page came from. Stop when you have twenty or so.';
+  } catch {
+    // The server is not listening for these, which is the normal case. Nothing
+    // about the transfer depends on it.
+  }
+}
+
 /** Live capture. */
 async function openCamera() {
   try {
@@ -397,6 +448,16 @@ function grab(element) {
   const picture = context.getImageData(0, 0, ui.grabber.width, ui.grabber.height);
   const buffer = picture.data.buffer;
 
+  // Keep this exact picture until its report comes back. Grabbing one after the
+  // fact would upload a later frame than the one being explained.
+  if (CAPTURING && session.captured < CAPTURE_LIMIT) {
+    const now = performance.now();
+    if (now - session.lastCapture > CAPTURE_INTERVAL_MS) {
+      session.lastCapture = now;
+      session.pending = new Promise((resolve) => ui.grabber.toBlob(resolve, 'image/png'));
+    }
+  }
+
   session.busy = true;
   session.frames += 1;
   ui.facts.frames.textContent = String(session.frames);
@@ -492,6 +553,16 @@ ui.video.addEventListener('change', () => {
 });
 ui.start.addEventListener('click', start);
 ui.stop.addEventListener('click', stop);
+
+if (CAPTURING) {
+  const banner = document.createElement('div');
+  banner.className = 'status bad';
+  banner.textContent =
+    'Diagnostic capture is ON. Pictures this page cannot read will be sent to ' +
+    `${location.origin}, which is the server that served this page. Remove ` +
+    '"?capture" from the address to turn it off.';
+  document.body.prepend(banner);
+}
 
 try {
   await init();

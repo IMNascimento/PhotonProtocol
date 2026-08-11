@@ -15,7 +15,7 @@
 
 import { createServer } from 'node:https';
 import { createServer as createHttpServer } from 'node:http';
-import { readFile, mkdir, writeFile, access } from 'node:fs/promises';
+import { access, appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { networkInterfaces } from 'node:os';
@@ -90,8 +90,71 @@ ${names}
   }
 }
 
+/** Where captured frames land, and how many have arrived. */
+const captures = join(root, 'captures');
+let captured = 0;
+let sent = 0;
+
+/**
+ * Takes a picture the receiving page could not read, and the report that went
+ * with it.
+ *
+ * This exists because a decoder's counters describe a failure and do not
+ * explain one, and because reasoning about somebody else's camera from a
+ * distance has a poor record. The frames land on disk next to a log of what the
+ * decoder made of each, and `photon decode captures/ --debug-dir dbg` then says
+ * the rest.
+ *
+ * Only ever reachable from the development server. The deployed pages have
+ * nowhere to send anything, which is the point of them.
+ */
+async function capture(request, response, url) {
+  const chunks = [];
+  for await (const chunk of request) chunks.push(chunk);
+  const png = Buffer.concat(chunks);
+
+  // Both ends land here, in separate directories. What was painted and what was
+  // photographed are the two halves of the question, and having only one of
+  // them is what has made this hard to pin down.
+  const kind = url.searchParams.get('kind') === 'sent' ? 'sent' : 'seen';
+  const directory = join(captures, kind);
+  await mkdir(directory, { recursive: true });
+
+  const report = url.searchParams.get('report') ?? '{}';
+  const outcome = url.searchParams.get('outcome') ?? 'painted';
+  const counter = kind === 'sent' ? sent : captured;
+  const index = String(counter).padStart(3, '0');
+
+  await writeFile(join(directory, `${kind}-${index}-${outcome}.png`), png);
+  await appendFile(
+    join(captures, 'reports.jsonl'),
+    `${JSON.stringify({ kind, index: counter, outcome, report: JSON.parse(report) })}\n`,
+  );
+
+  const detail = JSON.parse(report);
+  if (kind === 'sent') {
+    sent += 1;
+    console.log(`  painted  ${index}  ${detail.side ?? '?'}px, ${detail.cellPx ?? '?'} px/cell`);
+  } else {
+    captured += 1;
+    console.log(
+      `  seen     ${index}  ${outcome.padEnd(22)}` +
+        `${detail.pixelsPerCell ?? '—'} px/cell` +
+        `${detail.doubtfulRate ? `  ${(detail.doubtfulRate * 100).toFixed(1)}% doubtful` : ''}`,
+    );
+  }
+
+  response.writeHead(204).end();
+}
+
 async function handler(request, response) {
   const url = new URL(request.url, 'https://localhost');
+
+  if (request.method === 'POST' && url.pathname === '/capture') {
+    await capture(request, response, url);
+    return;
+  }
+
   let path = decodeURIComponent(url.pathname);
   if (path.endsWith('/')) path += 'index.html';
 
@@ -140,4 +203,16 @@ server.listen(port, '0.0.0.0', () => {
   console.log('Open the sender on the screen you are filming and the receiver on the');
   console.log('phone. The phone will warn about the certificate once; continue past it,');
   console.log('or the camera will not be offered.');
+  console.log();
+  console.log('To record both ends, add ?capture to each page:');
+  console.log(`  sender    ${scheme}://<this machine>:${port}/emit/?capture`);
+  console.log(`  receiver  ${scheme}://<this machine>:${port}/decode/?capture`);
+  console.log();
+  console.log('What was painted lands in ./captures/sent, what the camera saw in');
+  console.log('./captures/seen, and every report in ./captures/reports.jsonl. Then:');
+  console.log('  cargo run --release -p photon-cli -- decode captures/sent --debug-dir dbg/sent');
+  console.log('  cargo run --release -p photon-cli -- decode captures/seen --debug-dir dbg/seen');
+  console.log();
+  console.log('The first must decode perfectly -- it is the source. If it does not, the');
+  console.log('fault is in what is being drawn, and the camera was never the problem.');
 });

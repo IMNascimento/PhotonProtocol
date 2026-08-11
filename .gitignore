@@ -33,3 +33,6 @@ Thumbs.db
 
 # Locally generated development certificate
 /.certs/
+
+# Frames captured from a device during local diagnosis
+/captures/
