@@ -14,3 +14,8 @@ authors.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+brotli = "8.0.4"
+raptorq = "2.0.1"
+sha2 = "0.11.0"

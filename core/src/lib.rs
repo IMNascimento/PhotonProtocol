@@ -37,6 +37,7 @@
 pub mod codec;
 pub mod error;
 pub mod fec;
+pub mod file;
 pub mod frame;
 pub mod geom;
 pub mod image;
