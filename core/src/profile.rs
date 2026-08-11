@@ -169,6 +169,25 @@ impl Profile {
         self.num_shapes.ilog2() + self.num_colours.ilog2()
     }
 
+    /// Smallest cell, in device pixels, this profile can be painted at and
+    /// still read back (`SPEC.md` §4.1).
+    ///
+    /// It is a property of the shape alphabet rather than of the grid. The
+    /// 8-shape alphabet uses every one of the 16 sub-cells independently, so
+    /// each needs pixels of its own: at 8 the finest of them gets two, at 7 it
+    /// gets one, and one pixel averages away in any resampling. The 4-shape
+    /// alphabet is four half-planes, whose finest feature is half a cell rather
+    /// than a quarter, and it survives proportionally smaller.
+    ///
+    /// Measured, not reasoned about: on a pristine channel with no camera in
+    /// the path, `simulate::eight_pixels_per_cell_is_a_cliff_and_not_a_slope`
+    /// puts the 8-shape profiles at 5.9% and 2.5% of cells wrong one pixel
+    /// below their floor and at exactly zero on it.
+    #[must_use]
+    pub const fn min_cell_px(&self) -> u32 {
+        if self.num_shapes > 4 { 8 } else { 6 }
+    }
+
     /// Usable cells along one edge of a ring, and along one row of a header
     /// band: `G - 16`, the grid less the eight cells consumed by a finder box at
     /// each end.

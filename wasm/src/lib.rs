@@ -46,7 +46,7 @@ pub fn profiles() -> String {
                 concat!(
                     r#"{{"id":{},"name":"{}","grid":{},"shapes":{},"colours":{},"#,
                     r#""bitsPerCell":{},"dataCells":{},"payloadCapacity":{},"#,
-                    r#""parityRate":{:.4},"linkOverhead":{:.4}}}"#
+                    r#""minCellPx":{},"parityRate":{:.4},"linkOverhead":{:.4}}}"#
                 ),
                 p.id.as_u8(),
                 p.name,
@@ -56,6 +56,7 @@ pub fn profiles() -> String {
                 p.bits_per_cell(),
                 p.data_cells(),
                 p.payload_capacity(),
+                p.min_cell_px(),
                 p.rs_parity_rate(),
                 p.link_overhead(),
             )

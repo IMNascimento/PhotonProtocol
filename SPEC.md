@@ -96,9 +96,22 @@ assume the receiver started recording at symbol 0.
 A frame is a square **code area** of `G x G` cells surrounded by a **quiet
 zone**. `G` is fixed by the profile (§8) and is always a multiple of 32.
 
-Each cell is a square of `S x S` device pixels. `S` SHOULD be at least 8 and a
-multiple of 4, so that each of the 16 shape sub-cells (§4.3.1) covers at least
-2x2 pixels and all of them cover the same number.
+Each cell is a square of `S x S` device pixels. `S` MUST be at least the
+profile's minimum cell size `S_min` (§8), and SHOULD be a multiple of 4 so that
+all 16 shape sub-cells (§4.3.1) cover the same number of pixels.
+
+`S_min` is 8 for a profile with 8 shapes and 6 for a profile with 4 shapes,
+because it is the shape alphabet and not the grid that sets the limit. The
+8-shape alphabet uses each of the 16 sub-cells independently, so each needs
+pixels of its own; the 4-shape alphabet is four half-planes, whose finest
+feature is half a cell rather than a quarter of one.
+
+Below `S_min` the shape is lost while the colour survives, and the shape is most
+of the payload — 3 of the 5 bits in P2-standard. For the 8-shape profiles the
+loss is a cliff rather than a slope: painted and read back with no camera in the
+path at all, P2-standard reads 5.9% of its cells wrongly at `S = 7` and 0.0% at
+`S = 8`, and P3-dense 2.5% and 0.0%. An emitter fitting a code to a screen too
+small for the profile MUST choose a sparser profile rather than a smaller cell.
 
 `S` is not always a free choice: an emitter fits the code to a screen it did not
 choose, and rounding the cell down to the next multiple of 4 can cost a fifth of
@@ -690,11 +703,17 @@ CRCs, RaptorQ — protects throughput; only this protects correctness.
 A profile fixes every physical-layer parameter. The `profile_id` in the frame
 header declares which one is in use.
 
-| profile | id | grid `G` | shapes | colours | `b` | header | payload RS | data cells | payload capacity |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `P1-conservative` | `0x01` | 96 | 4 | 4 | 4 | `RS(40,20)` x2 | `RS(255,175)` | 7622 | 2611 B |
-| `P2-standard` | `0x02` | 128 | 8 | 4 | 5 | `RS(42,20)` x2 | `RS(255,199)` | 14502 | 7047 B |
-| `P3-dense` | `0x03` | 160 | 8 | 8 | 6 | `RS(54,20)` x2 | `RS(255,223)` | 23270 | 15244 B |
+| profile | id | grid `G` | shapes | colours | `b` | `S_min` | header | payload RS | data cells | payload capacity |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `P1-conservative` | `0x01` | 96 | 4 | 4 | 4 | 6 | `RS(40,20)` x2 | `RS(255,175)` | 7622 | 2611 B |
+| `P2-standard` | `0x02` | 128 | 8 | 4 | 5 | 8 | `RS(42,20)` x2 | `RS(255,199)` | 14502 | 7047 B |
+| `P3-dense` | `0x03` | 160 | 8 | 8 | 6 | 8 | `RS(54,20)` x2 | `RS(255,223)` | 23270 | 15244 B |
+
+`S_min` is the smallest cell in device pixels the profile may be painted at
+(§4.1). Multiplied by `G + 8` it gives the smallest square of screen the profile
+can be sent from: 624 pixels for `P1-conservative`, 1088 for `P2-standard` and
+1344 for `P3-dense`. A 1080p display held in landscape can therefore carry
+`P2-standard` and not `P3-dense`, which is why the default is the one it is.
 
 Derived quantities, for cross-checking an implementation:
 

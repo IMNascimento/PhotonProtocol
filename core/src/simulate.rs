@@ -806,4 +806,45 @@ mod illumination {
             );
         }
     }
+
+    #[test]
+    fn eight_pixels_per_cell_is_a_cliff_and_not_a_slope() {
+        // `SPEC.md` §4.1 says `S` SHOULD be at least 8 "so that each shape
+        // sub-cell covers at least 2x2 pixels". This measures what that SHOULD
+        // is worth, because an emitter fitting a code to somebody's screen will
+        // go under it unless something stops it, and one did: a phone reading a
+        // laptop at 7 pixels per cell failed every frame while its colours came
+        // through perfectly.
+        //
+        // Under 8 the last sub-cell of the 4x4 mask gets a single device pixel,
+        // and a single pixel does not survive being resampled. The shape is
+        // then read wrongly and the shape is most of the payload — 3 of the 5
+        // bits in P2-standard. This is not a gradual loss of margin that a
+        // steadier hand recovers; it is a floor, and the numbers on either side
+        // of it are 5.85% and 0.00%.
+        for profile in &PROFILES {
+            let floor = profile.min_cell_px();
+            let at = measure(profile, &Channel::pristine(), floor, 0.08);
+            assert!(
+                at.cell_error_rate() < 1e-9,
+                "{} at its floor of {floor} px per cell lost {:.3}% of cells on a pristine channel",
+                profile.name,
+                at.cell_error_rate() * 100.0
+            );
+
+            // One pixel under, and only for the alphabet the floor exists for.
+            // The 4-shape alphabet degrades from here rather than falling, so
+            // asserting a cliff it does not have would be asserting a fiction.
+            if profile.num_shapes > 4 {
+                let below = measure(profile, &Channel::pristine(), floor - 1, 0.08);
+                assert!(
+                    below.cell_error_rate() > 0.02,
+                    "{} at {} px per cell lost only {:.3}% of cells, so the floor has moved",
+                    profile.name,
+                    floor - 1,
+                    below.cell_error_rate() * 100.0
+                );
+            }
+        }
+    }
 }
