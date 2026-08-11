@@ -1,0 +1,8 @@
+# The minimum supported Rust version is declared in Cargo.toml (rust-version)
+# and enforced by a dedicated CI job. Day-to-day work tracks stable so that new
+# lints are seen early rather than at the next MSRV bump.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

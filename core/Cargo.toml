@@ -1,0 +1,16 @@
+[package]
+name = "photon-core"
+description = "Reference implementation of the PhotonProtocol screen-to-camera file transfer protocol"
+keywords = ["optical", "fountain-code", "raptorq", "air-gap", "file-transfer"]
+categories = ["encoding", "multimedia::encoding"]
+readme = "../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true

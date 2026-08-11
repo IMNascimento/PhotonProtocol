@@ -1,0 +1,8 @@
+edition = "2024"
+max_width = 100
+# Let calls, structs and assertions use the full line width instead of the
+# narrow defaults. Protocol code is dense with short numeric fields, and
+# splitting `RsPartition { .. }` over five lines hides the shape of the data.
+use_small_heuristics = "Max"
+use_field_init_shorthand = true
+newline_style = "Unix"

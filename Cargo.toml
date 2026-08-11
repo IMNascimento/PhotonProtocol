@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = ["core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/IMNascimento/PhotonProtocol"
+homepage = "https://github.com/IMNascimento/PhotonProtocol"
+authors = ["Igor Nascimento and the PhotonProtocol contributors"]
+
+[workspace.dependencies]
+photon-core = { path = "core", version = "0.1.0" }
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# The protocol works in cell counts, byte offsets and bit widths. Silent
+# truncation there is a correctness bug, so make the casts explicit failures
+# rather than warnings we learn to scroll past.
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+indexing_slicing = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# The decoder is the expensive half and is always built in release, but it is
+# also the half that needs a debugger. Keep symbols.
+[profile.release.package.photon-cli]
+debug = 1

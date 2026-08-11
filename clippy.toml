@@ -1,0 +1,15 @@
+# Proper nouns that appear throughout the documentation. They are names, not
+# code items, so `doc_markdown` must not demand backticks around them. The
+# trailing ".." keeps clippy's own default list.
+doc-valid-idents = [
+    "PhotonProtocol",
+    "RaptorQ",
+    "WebAssembly",
+    "WebCodecs",
+    "SharedArrayBuffer",
+    "..",
+]
+
+# The specification is written for humans and this crate is written to be read
+# alongside it, so allow the explanatory doc comments to be long.
+too-many-lines-threshold = 120
