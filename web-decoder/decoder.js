@@ -26,6 +26,8 @@ const ui = {
   live: document.getElementById('live'),
   bar: document.getElementById('bar'),
   aim: document.getElementById('aim'),
+  sample: document.getElementById('sample'),
+  sampleRow: document.getElementById('sample-row'),
   status: document.getElementById('status'),
   result: document.getElementById('result'),
   download: document.getElementById('download'),
@@ -38,7 +40,8 @@ const ui = {
     used: document.getElementById('fact-used'),
     missed: document.getElementById('fact-missed'),
     straddled: document.getElementById('fact-straddled'),
-    damaged: document.getElementById('fact-damaged'),
+    header: document.getElementById('fact-header'),
+    cells: document.getElementById('fact-cells'),
     doubtful: document.getElementById('fact-doubtful'),
     name: document.getElementById('fact-name'),
   },
@@ -79,6 +82,7 @@ function setMode(next) {
 }
 
 function reset() {
+  ui.sampleRow.style.display = 'none';
   ui.result.classList.add('hidden');
   ui.download.classList.add('hidden');
   ui.status.classList.add('hidden');
@@ -99,7 +103,9 @@ async function start() {
     used: 0,
     missed: 0,
     straddled: 0,
-    damaged: 0,
+    headerLost: 0,
+    cellsLost: 0,
+    sampled: false,
     doubtfulTotal: 0,
     doubtfulFrames: 0,
     perCell: null,
@@ -160,17 +166,31 @@ function applyReport(report) {
     case 'straddled':
       session.straddled += 1;
       break;
+    // Kept apart because they mean opposite things. A header that will not
+    // read is solid black-and-white cells failing, which points at geometry or
+    // exposure. A payload that will not decode after a readable header points
+    // at the cell classifier, and the doubtful rate below says which.
     case 'headerUnreadable':
+      session.headerLost += 1;
+      break;
     case 'payloadUnrecoverable':
-      session.damaged += 1;
+      session.cellsLost += 1;
       break;
     case 'decoded':
       session.used += 1;
-      session.doubtfulTotal += report.doubtfulRate;
-      session.doubtfulFrames += 1;
       break;
     default:
       break;
+  }
+
+  // The doubtful rate is measured on every frame that got as far as reading
+  // cells, not only on the ones that worked. On a failing capture it is the
+  // most informative number available: near zero means the cells are being read
+  // confidently and wrongly, which is a different fault from reading them
+  // uncertainly.
+  if (report.outcome === 'decoded' || report.outcome === 'payloadUnrecoverable') {
+    session.doubtfulTotal += report.doubtfulRate;
+    session.doubtfulFrames += 1;
   }
 
   if (typeof report.pixelsPerCell === 'number') {
@@ -184,7 +204,8 @@ function applyReport(report) {
   ui.facts.used.textContent = String(session.used);
   ui.facts.missed.textContent = String(session.missed);
   ui.facts.straddled.textContent = String(session.straddled);
-  ui.facts.damaged.textContent = String(session.damaged);
+  ui.facts.header.textContent = String(session.headerLost);
+  ui.facts.cells.textContent = String(session.cellsLost);
 
   if (report.needed > 0) {
     ui.bar.max = report.needed;
@@ -220,6 +241,28 @@ function updateAim() {
     ui.aim.textContent =
       `Only ${session.perCell.toFixed(1)} camera pixels per cell — too few for the ` +
       `cells to be read reliably. Move closer, or fill more of the frame with the screen.`;
+    return;
+  }
+  // A readable header and unreadable cells is its own fault, and the doubtful
+  // rate distinguishes its two causes.
+  if (session.cellsLost > 4 && session.cellsLost > session.used) {
+    const rate = session.doubtfulFrames > 0
+      ? (session.doubtfulTotal / session.doubtfulFrames) * 100
+      : 0;
+    ui.aim.textContent = rate > 2
+      ? `The code is found and its header reads, but ${rate.toFixed(1)}% of cells ` +
+        'are being read uncertainly. That is focus, glare or motion — steady the ' +
+        'camera, get the whole screen evenly lit, and let it focus.'
+      : 'The code is found and its header reads, but the cells decode to the ' +
+        'wrong values with high confidence. Please save a picture below — this ' +
+        'is not something the counters can explain.';
+    return;
+  }
+  if (session.headerLost > 4 && session.headerLost > session.used) {
+    ui.aim.textContent =
+      'The code is found but its header will not read. The header is the ' +
+      'sturdiest part of a frame, so this usually means the code is being ' +
+      'scaled or clipped on the sending screen. Please save a picture below.';
     return;
   }
   if (session.frames > 12 && session.used === 0) {
@@ -360,6 +403,20 @@ function grab(element) {
 
   // Ask for a diagnosis every so often, but only while nothing has worked yet.
   const diagnose = session.used === 0 && session.frames % 15 === 0;
+
+  // Keep one picture that failed, exactly as the decoder saw it. Guessing at a
+  // capture from counters has a limit, and this is where it ends: the same
+  // bytes can go through the command line, which prints every measurement.
+  if (!session.sampled && session.used === 0 && session.frames === 25) {
+    session.sampled = true;
+    ui.grabber.toBlob((blob) => {
+      if (!blob) return;
+      ui.sample.href = URL.createObjectURL(blob);
+      ui.sample.download = 'photon-unread-frame.png';
+      ui.sample.textContent = 'Save a picture this could not read (for diagnosis)';
+      ui.sampleRow.style.display = '';
+    }, 'image/png');
+  }
 
   worker.postMessage(
     {

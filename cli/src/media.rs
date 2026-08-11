@@ -77,6 +77,14 @@ pub(crate) fn read_image(path: &Path) -> Result<RgbImage> {
         .ok_or_else(|| MediaError::Image(format!("{}: unexpected buffer size", path.display())))
 }
 
+/// Whether a path names something this build can read as a picture.
+#[must_use]
+pub(crate) fn looks_like_an_image(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|extension| {
+        matches!(extension.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "bmp")
+    })
+}
+
 /// Every image file in a directory, in name order.
 ///
 /// Name order is frame order because the extractor pads its numbering, and it is
@@ -90,11 +98,7 @@ pub(crate) fn frame_paths(directory: &Path) -> Result<Vec<PathBuf>> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(directory)?
         .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension().and_then(|e| e.to_str()).is_some_and(|extension| {
-                matches!(extension.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "bmp")
-            })
-        })
+        .filter(|path| looks_like_an_image(path))
         .collect();
     paths.sort();
     Ok(paths)

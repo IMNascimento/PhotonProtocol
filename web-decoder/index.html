@@ -79,11 +79,15 @@
     <dt>Frames used</dt><dd id="fact-used">—</dd>
     <dt>Code not found</dt><dd id="fact-missed">—</dd>
     <dt>Caught mid-change</dt><dd id="fact-straddled">—</dd>
-    <dt>Too damaged</dt><dd id="fact-damaged">—</dd>
+    <dt>Header unreadable</dt><dd id="fact-header">—</dd>
+    <dt>Cells unreadable</dt><dd id="fact-cells">—</dd>
     <dt>Doubtful cells</dt><dd id="fact-doubtful">—</dd>
     <dt>File</dt><dd id="fact-name">—</dd>
   </dl>
   <p class="note" id="aim"></p>
+  <div class="row" id="sample-row" style="display:none">
+    <a id="sample" class="note"></a>
+  </div>
 </div>
 
 <div id="status" class="status hidden"></div>
@@ -119,6 +123,17 @@
     going; the sender never repeats itself, so every extra second is new data.
   </li>
 </ul>
+
+<h2>Sending a picture for diagnosis</h2>
+<p class="note">
+  If it keeps failing, this page offers one of the pictures it could not read,
+  exactly as the decoder saw it. Run it through the command line and it will
+  print every measurement it took:
+</p>
+<pre class="note"><code>photon decode picture.png</code></pre>
+<p class="note">
+  A directory of pictures works too, and neither needs ffmpeg.
+</p>
 
 <p class="note"><a href="../">Back</a> · <a href="../emit/">Send a file instead</a></p>
 

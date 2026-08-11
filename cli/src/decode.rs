@@ -157,27 +157,68 @@ pub(crate) fn run(
             println!("                {error}");
             if error.is_recoverable_by_more_capture() {
                 println!();
-                if tally.straddled > tally.decoded {
-                    println!(
-                        "{} frames caught two codes at once. The sending screen is changing",
-                        tally.straddled
-                    );
-                    println!("faster than this camera can capture a whole one. Hold each code for");
-                    println!("longer on the sending device and film it again.");
-                } else if tally.located > 0 && tally.pixels_per_cell() < 5.0 {
-                    println!(
-                        "At {:.1} pixels per cell the screen was too small in the shot for the",
-                        tally.pixels_per_cell()
-                    );
-                    println!("cell alphabet to be separable. Get closer before anything else.");
-                } else {
-                    println!("This is the kind of failure more filming fixes. Fill more of the");
-                    println!("frame with the screen, hold steadier, and keep recording longer.");
-                }
+                print_advice(&tally);
             }
             Err(format!("decode failed: {error}"))
         }
     }
+}
+
+/// Says which of the failures this was, and what changes it.
+///
+/// The counters make the difference obvious and a person reading them should
+/// not have to work it out. Each branch has a different fix and three of the
+/// four are not "film for longer", which is what a generic message would have
+/// sent everyone off to do.
+fn print_advice(tally: &Tally) {
+    if tally.straddled > tally.decoded {
+        println!(
+            "{} frames caught two codes at once. The sending screen is changing",
+            tally.straddled
+        );
+        println!("faster than this camera can capture a whole one. Hold each code for");
+        println!("longer on the sending device and film it again.");
+        return;
+    }
+
+    if tally.payload_lost > tally.decoded {
+        let doubtful = tally.doubtful_rate() * 100.0;
+        println!(
+            "{} frames were found and their headers read, but their cells did not",
+            tally.payload_lost
+        );
+        println!("decode. {doubtful:.2}% of cells were read uncertainly.");
+        if tally.doubtful_rate() < 0.02 {
+            println!("That is low, which means the cells are being read confidently and");
+            println!("wrongly rather than uncertainly — a systematic fault rather than a");
+            println!("marginal capture. Keep one of these frames; it is worth looking at.");
+        } else {
+            println!("Steady the camera, light the screen evenly, and let it focus.");
+        }
+        return;
+    }
+
+    if tally.header_unreadable > tally.decoded {
+        println!(
+            "{} frames were found but their headers would not read. The header is",
+            tally.header_unreadable
+        );
+        println!("the sturdiest part of a frame — solid black and white cells — so this");
+        println!("usually means the code is being scaled or clipped on the sending screen.");
+        return;
+    }
+
+    if tally.located > 0 && tally.pixels_per_cell() < 5.0 {
+        println!(
+            "At {:.1} pixels per cell the screen was too small in the shot for the",
+            tally.pixels_per_cell()
+        );
+        println!("cell alphabet to be separable. Get closer before anything else.");
+        return;
+    }
+
+    println!("This is the kind of failure more filming fixes. Fill more of the");
+    println!("frame with the screen, hold steadier, and keep recording longer.");
 }
 
 /// Collects the frames to decode, extracting them if the input is a video.
@@ -197,6 +238,14 @@ fn gather_frames(
         return Ok((frames, None));
     }
 
+    // A single picture is a perfectly good input, and the most useful one when
+    // something is going wrong: it is what the receiving page hands over for
+    // diagnosis. Sending it to ffprobe because it is not a directory would fail
+    // for a reason that has nothing to do with the picture.
+    if media::looks_like_an_image(input) {
+        return Ok((vec![input.to_path_buf()], None));
+    }
+
     let info = media::probe(input).map_err(|e| e.to_string())?;
     let frames = media::extract_frames(input, scratch, max_frames).map_err(|e| e.to_string())?;
     Ok((frames, Some(info)))
@@ -207,8 +256,8 @@ fn print_frame_report(tally: &Tally) {
     println!("{:<16}{:>8}", "decoded", tally.decoded);
     println!("{:<16}{:>8}", "duplicate", tally.duplicate);
     println!("{:<16}{:>8}", "not located", tally.not_located);
-    println!("{:<16}{:>8}", "header lost", tally.header_unreadable);
-    println!("{:<16}{:>8}", "payload lost", tally.payload_lost);
+    println!("{:<16}{:>8}", "header unreadable", tally.header_unreadable);
+    println!("{:<16}{:>8}", "cells unreadable", tally.payload_lost);
     println!("{:<16}{:>8}", "two at once", tally.straddled);
     println!("{:<16}{:>8}", "other session", tally.wrong_session);
     println!();
