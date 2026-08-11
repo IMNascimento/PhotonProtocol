@@ -1,25 +1,31 @@
-// The receiving half. Plays the recording, hands frames to a worker, and shows
-// what the protocol makes of them.
+// The receiving half. Takes frames from the camera or from a recording, hands
+// them to a worker, and shows what the protocol makes of them.
 //
-// Frames are taken from a `<video>` element rather than demuxed by hand. That
-// means the browser's own hardware decoder does the container and codec work,
-// which no amount of JavaScript would do better, and it keeps this page free of
-// the megabyte of demuxer a WebCodecs pipeline would need.
+// Frames come from a `<video>` element either way — a live stream or a file —
+// so one pipeline serves both. For files that means the browser's own hardware
+// decoder does the container and codec work, which no JavaScript would do
+// better, and it keeps a megabyte of demuxer out of the page.
 //
-// The consequence is that frames arrive as fast as they play and are dropped
-// when the worker is busy. For most formats that would be a problem. Here it is
-// the assumption the protocol was built on: any large enough subset of the
-// stream rebuilds the file, so a skipped frame costs time and nothing else.
+// The consequence is that frames arrive in real time and are dropped whenever
+// the decoder is busy. For most formats that would be a problem. Here it is the
+// assumption the protocol was built on: any large enough subset of the stream
+// rebuilds the file, so a skipped frame costs time and nothing else.
 
 import init, { profiles } from '../photon/photon_wasm.js';
 
 const ui = {
+  modeCamera: document.getElementById('mode-camera'),
+  modeFile: document.getElementById('mode-file'),
+  cameraPane: document.getElementById('camera-pane'),
+  filePane: document.getElementById('file-pane'),
+  preview: document.getElementById('preview'),
   video: document.getElementById('video'),
   profile: document.getElementById('profile'),
   start: document.getElementById('start'),
   stop: document.getElementById('stop'),
   live: document.getElementById('live'),
   bar: document.getElementById('bar'),
+  aim: document.getElementById('aim'),
   status: document.getElementById('status'),
   result: document.getElementById('result'),
   download: document.getElementById('download'),
@@ -27,6 +33,7 @@ const ui = {
   grabber: document.getElementById('grabber'),
   facts: {
     blocks: document.getElementById('fact-blocks'),
+    perCell: document.getElementById('fact-percell'),
     frames: document.getElementById('fact-frames'),
     used: document.getElementById('fact-used'),
     missed: document.getElementById('fact-missed'),
@@ -35,12 +42,23 @@ const ui = {
   },
 };
 
-/** How much faster than real time to play the recording. */
+/** How much faster than real time to play a recorded file. */
 const PLAYBACK_RATE = 4;
+
+/**
+ * Pixels per cell below which a capture is not going to work.
+ *
+ * Each cell carries a 4x4 shape mask, so at four pixels per cell a sub-cell is
+ * a single pixel and the alphabet stops being separable. The measurement in
+ * `docs/phase-1-report.md` is what this threshold comes from, and it is the one
+ * failure no amount of extra filming repairs.
+ */
+const MINIMUM_PIXELS_PER_CELL = 5;
 
 let PROFILES = [];
 let worker = null;
 let session = null;
+let mode = 'camera';
 
 function say(message, kind = '') {
   ui.status.textContent = message;
@@ -48,24 +66,31 @@ function say(message, kind = '') {
   ui.status.classList.remove('hidden');
 }
 
+function setMode(next) {
+  mode = next;
+  ui.cameraPane.classList.toggle('hidden', next !== 'camera');
+  ui.filePane.classList.toggle('hidden', next !== 'file');
+  ui.modeCamera.className = next === 'camera' ? '' : 'secondary';
+  ui.modeFile.className = next === 'file' ? '' : 'secondary';
+  ui.start.textContent = next === 'camera' ? 'Start the camera' : 'Read the recording';
+  ui.start.disabled = next === 'file' && !ui.video.files?.length;
+}
+
 function reset() {
   ui.result.classList.add('hidden');
   ui.download.classList.add('hidden');
   ui.status.classList.add('hidden');
+  ui.aim.textContent = '';
   ui.bar.value = 0;
   for (const node of Object.values(ui.facts)) node.textContent = '—';
 }
 
-/** Starts reading the chosen recording. */
+/** Starts reading, from whichever source is selected. */
 async function start() {
-  const file = ui.video.files?.[0];
-  if (!file) return;
-
   reset();
   ui.live.classList.remove('hidden');
   ui.start.disabled = true;
   ui.stop.classList.remove('hidden');
-  say('Loading the recording…');
 
   session = {
     frames: 0,
@@ -73,16 +98,16 @@ async function start() {
     missed: 0,
     doubtfulTotal: 0,
     doubtfulFrames: 0,
+    perCell: null,
     busy: false,
     finished: false,
-    url: URL.createObjectURL(file),
+    url: null,
+    stream: null,
   };
 
   worker = new Worker(new URL('./decoder-worker.js', import.meta.url), { type: 'module' });
   worker.onmessage = onWorkerMessage;
-
-  const profile = PROFILES[ui.profile.selectedIndex];
-  worker.postMessage({ type: 'start', profile: profile.id });
+  worker.postMessage({ type: 'start', profile: PROFILES[ui.profile.selectedIndex].id });
 }
 
 function onWorkerMessage(event) {
@@ -90,7 +115,8 @@ function onWorkerMessage(event) {
 
   switch (message.type) {
     case 'ready':
-      play();
+      if (mode === 'camera') openCamera();
+      else playFile();
       break;
 
     case 'report':
@@ -121,6 +147,11 @@ function applyReport(report) {
     session.doubtfulFrames += 1;
   }
 
+  if (typeof report.pixelsPerCell === 'number') {
+    session.perCell = report.pixelsPerCell;
+    ui.facts.perCell.textContent = report.pixelsPerCell.toFixed(1);
+  }
+
   ui.facts.used.textContent = String(session.used);
   ui.facts.missed.textContent = String(session.missed);
 
@@ -134,10 +165,78 @@ function applyReport(report) {
     const rate = (session.doubtfulTotal / session.doubtfulFrames) * 100;
     ui.facts.doubtful.textContent = `${rate.toFixed(2)}%`;
   }
+
+  updateAim();
 }
 
-/** Plays the recording, feeding presented frames to the worker. */
-function play() {
+/**
+ * Says the one thing the person holding the camera can act on.
+ *
+ * Pixels per cell first, because it is the only failure extra filming does not
+ * fix, and because it is the only one they can change by moving.
+ */
+function updateAim() {
+  if (session.perCell !== null && session.perCell < MINIMUM_PIXELS_PER_CELL) {
+    ui.aim.textContent =
+      `Only ${session.perCell.toFixed(1)} camera pixels per cell — too few for the ` +
+      `cells to be read reliably. Move closer, or fill more of the frame with the screen.`;
+    return;
+  }
+  if (session.frames > 12 && session.used === 0) {
+    ui.aim.textContent =
+      'The code has not been found yet. Get the whole of the other screen in ' +
+      'shot, hold steadier, and keep glare off it.';
+    return;
+  }
+  if (session.used > 0) {
+    ui.aim.textContent = 'Reading. Keep the screen in shot until this finishes.';
+  }
+}
+
+/** Live capture. */
+async function openCamera() {
+  try {
+    // Ask for as much resolution as the device will give. Browsers hand out
+    // less than the camera app records at, and how much less is the difference
+    // between this working and not, so it is worth asking loudly.
+    session.stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 3840 },
+        height: { ideal: 2160 },
+        frameRate: { ideal: 30 },
+      },
+      audio: false,
+    });
+  } catch (error) {
+    concludeFailure(`the camera could not be opened: ${error}`);
+    return;
+  }
+
+  ui.preview.srcObject = session.stream;
+  await ui.preview.play().catch(() => {});
+
+  const track = session.stream.getVideoTracks()[0];
+  const settings = track?.getSettings?.() ?? {};
+  const width = settings.width ?? ui.preview.videoWidth;
+  const height = settings.height ?? ui.preview.videoHeight;
+
+  ui.grabber.width = width;
+  ui.grabber.height = height;
+  say(`Camera open at ${width}×${height}. Point it at the other screen.`);
+
+  pump(ui.preview);
+}
+
+/** A recording already on the device. */
+function playFile() {
+  const file = ui.video.files?.[0];
+  if (!file) {
+    concludeFailure('no recording was chosen');
+    return;
+  }
+
+  session.url = URL.createObjectURL(file);
   const player = ui.player;
   player.src = session.url;
   player.playbackRate = PLAYBACK_RATE;
@@ -157,40 +256,46 @@ function play() {
 
   player.onerror = () => concludeFailure('the browser could not read this video file');
 
-  if ('requestVideoFrameCallback' in player) {
-    const pump = () => {
+  pump(player);
+  player.play().catch((error) => concludeFailure(`the recording would not play: ${error}`));
+}
+
+/** Feeds presented frames to the worker, from either source. */
+function pump(element) {
+  if ('requestVideoFrameCallback' in element) {
+    const step = () => {
       if (session.finished) return;
-      grab();
-      player.requestVideoFrameCallback(pump);
+      grab(element);
+      element.requestVideoFrameCallback(step);
     };
-    player.requestVideoFrameCallback(pump);
-  } else {
-    // Older browsers present no per-frame callback. Sampling on a timer sees
-    // fewer frames, which costs time rather than correctness.
-    const timer = setInterval(() => {
-      if (session.finished || player.ended) {
-        clearInterval(timer);
-        return;
-      }
-      grab();
-    }, 40);
+    element.requestVideoFrameCallback(step);
+    return;
   }
 
-  player.play().catch((error) => concludeFailure(`the recording would not play: ${error}`));
+  // Older browsers present no per-frame callback. Sampling on a timer sees
+  // fewer frames, which costs time rather than correctness.
+  const timer = setInterval(() => {
+    if (session.finished) {
+      clearInterval(timer);
+      return;
+    }
+    grab(element);
+  }, 40);
 }
 
 /**
  * Sends the frame now on screen to the worker, unless it is still busy.
  *
  * Skipping rather than queueing is deliberate. A queue would grow without
- * bound, hold every frame's pixels in memory, and deliver stale frames long
- * after the file was already recoverable.
+ * bound, hold every frame's pixels in memory, and go on delivering stale frames
+ * long after the file was already recoverable.
  */
-function grab() {
+function grab(element) {
   if (session.busy || session.finished) return;
+  if (!ui.grabber.width || !ui.grabber.height) return;
 
   const context = ui.grabber.getContext('2d', { willReadFrequently: true });
-  context.drawImage(ui.player, 0, 0);
+  context.drawImage(element, 0, 0, ui.grabber.width, ui.grabber.height);
 
   const picture = context.getImageData(0, 0, ui.grabber.width, ui.grabber.height);
   const buffer = picture.data.buffer;
@@ -200,20 +305,14 @@ function grab() {
   ui.facts.frames.textContent = String(session.frames);
 
   worker.postMessage(
-    {
-      type: 'frame',
-      buffer,
-      width: ui.grabber.width,
-      height: ui.grabber.height,
-      index: session.frames,
-    },
+    { type: 'frame', buffer, width: ui.grabber.width, height: ui.grabber.height },
     [buffer],
   );
 }
 
 function finishWith(name, buffer) {
   session.finished = true;
-  stopPlayback();
+  stopSources();
 
   const bytes = new Uint8Array(buffer);
   const blob = new Blob([bytes], { type: 'application/octet-stream' });
@@ -225,6 +324,7 @@ function finishWith(name, buffer) {
   ui.download.className = '';
   ui.result.classList.remove('hidden');
   ui.download.classList.remove('hidden');
+  ui.aim.textContent = '';
 
   say('Recovered, and the digest matches. The file is exactly what was sent.', 'good');
   ui.start.disabled = false;
@@ -232,16 +332,26 @@ function finishWith(name, buffer) {
 }
 
 function concludeFailure(message) {
-  session.finished = true;
-  stopPlayback();
-  say(message, 'bad');
+  if (session) session.finished = true;
+  stopSources();
+
+  const advice =
+    session?.perCell !== null && session?.perCell < MINIMUM_PIXELS_PER_CELL
+      ? ` At ${session.perCell.toFixed(1)} pixels per cell the screen was too small in` +
+        ' the shot for the cells to be read. Get closer, or record with the camera app' +
+        ' and load the file instead.'
+      : '';
+
+  say(`${message}.${advice}`, 'bad');
   ui.start.disabled = false;
   ui.stop.classList.add('hidden');
 }
 
-function stopPlayback() {
+function stopSources() {
   ui.player.pause();
   ui.player.onended = null;
+  session?.stream?.getTracks?.().forEach((track) => track.stop());
+  ui.preview.srcObject = null;
   if (session?.url) URL.revokeObjectURL(session.url);
   worker?.terminate();
   worker = null;
@@ -251,9 +361,12 @@ function stop() {
   if (!session || session.finished) return;
   say('Stopping. Working out what was recovered…');
   ui.player.pause();
+  session.stream?.getTracks?.().forEach((track) => track.stop());
   worker?.postMessage({ type: 'finish' });
 }
 
+ui.modeCamera.addEventListener('click', () => setMode('camera'));
+ui.modeFile.addEventListener('click', () => setMode('file'));
 ui.video.addEventListener('change', () => {
   ui.start.disabled = !ui.video.files?.length;
 });
@@ -270,6 +383,13 @@ try {
     ui.profile.append(option);
   }
   ui.profile.selectedIndex = Math.min(1, PROFILES.length - 1);
+
+  const hasCamera = Boolean(navigator.mediaDevices?.getUserMedia);
+  setMode(hasCamera ? 'camera' : 'file');
+  if (!hasCamera) {
+    ui.modeCamera.disabled = true;
+    ui.modeCamera.title = 'This browser does not offer camera access';
+  }
 } catch (error) {
   say(`The protocol module failed to load: ${error}`, 'bad');
   ui.start.disabled = true;
