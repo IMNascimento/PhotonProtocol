@@ -34,6 +34,7 @@
 //! reviewed; implementing them earlier would only produce code that has to be
 //! rewritten against a format that moved underneath it.
 
+pub mod codec;
 pub mod error;
 pub mod fec;
 pub mod frame;
