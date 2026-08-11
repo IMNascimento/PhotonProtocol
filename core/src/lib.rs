@@ -35,6 +35,7 @@
 //! rewritten against a format that moved underneath it.
 
 pub mod codec;
+pub mod detect;
 pub mod error;
 pub mod fec;
 pub mod file;
