@@ -94,6 +94,16 @@ pub struct Channel {
     pub lift: f32,
     /// Standard deviation of additive sensor noise, on a 0-to-1 scale.
     pub noise: f32,
+    /// Illumination falloff towards the corners, as a fraction.
+    ///
+    /// Every photograph of a screen has this. Lens vignetting darkens the
+    /// corners, the backlight is not uniform, and a screen seen at any angle is
+    /// brighter at the near edge. Nothing else in this model varies across the
+    /// frame, which made it the one thing a decoder could not be tested against.
+    pub vignette: f32,
+    /// Brightness tilt across the frame, as a fraction, positive to the right
+    /// and down. Models glare from one side and an off-axis view.
+    pub tilt: f32,
     /// Block quantisation strength, 0 for none and 1 for heavy. Models the
     /// blocking and ringing of a compressed video.
     pub blocking: f32,
@@ -112,6 +122,8 @@ impl Channel {
             gain: [1.0, 1.0, 1.0],
             lift: 0.0,
             noise: 0.0,
+            vignette: 0.0,
+            tilt: 0.0,
             blocking: 0.0,
             seed: 0x5EED,
         }
@@ -140,6 +152,8 @@ impl Channel {
             gain: [1.0 + 0.30 * sf, 1.0 - 0.06 * sf, 1.0 - 0.28 * sf],
             lift: 0.10 * sf,
             noise: 0.055 * sf,
+            vignette: 0.35 * sf,
+            tilt: 0.25 * sf,
             blocking: sf,
             seed: 0x5EED,
         }
@@ -206,9 +220,11 @@ impl Channel {
         Homography::from_quads(src, dst).unwrap_or_else(Homography::identity)
     }
 
-    /// Gain, lift and noise: everything the sensor and its processing add after
-    /// the light has arrived.
+    /// Gain, lift, illumination shape and noise: everything the sensor and its
+    /// processing add after the light has arrived.
     fn apply_response(&self, image: &mut RgbImage, rng: &mut Rng) {
+        let (width, height) = (f32::from(0u8) + image.width() as f32, image.height() as f32);
+
         for y in 0..image.height() {
             for x in 0..image.width() {
                 let pixel = image.get(x, y);
@@ -217,8 +233,11 @@ impl Channel {
                     f32::from(pixel.g) / 255.0,
                     f32::from(pixel.b) / 255.0,
                 ];
+
+                let illumination = self.illumination_at(x as f32 / width, y as f32 / height);
+
                 for (value, gain) in channels.iter_mut().zip(self.gain.iter()) {
-                    *value = value.mul_add(*gain, self.lift);
+                    *value = value.mul_add(*gain * illumination, self.lift * illumination);
                     if self.noise > 0.0 {
                         *value += rng.normal() * self.noise;
                     }
@@ -226,6 +245,15 @@ impl Channel {
                 image.set(x, y, to_rgb8(channels[0], channels[1], channels[2]));
             }
         }
+    }
+
+    /// How bright this part of the frame is, relative to the middle.
+    fn illumination_at(&self, u: f32, v: f32) -> f32 {
+        let (dx, dy) = (u - 0.5, v - 0.5);
+        let radius = (dx * dx + dy * dy).sqrt() / core::f32::consts::FRAC_1_SQRT_2;
+        let falloff = self.vignette.mul_add(-(radius * radius), 1.0);
+        let slope = self.tilt.mul_add(dx + dy, 1.0);
+        (falloff * slope).max(0.05)
     }
 }
 
@@ -652,5 +680,130 @@ mod tests {
         channel.lift = 0.08;
         let rate = cell_error_rate(profile, &channel, 8);
         assert!(rate < 1e-12, "a colour cast defeated the per-frame calibration: {rate:.4}");
+    }
+}
+
+#[cfg(test)]
+mod illumination {
+    use super::*;
+    use crate::profile::PROFILES;
+
+    /// An otherwise perfect capture with only an uneven illumination.
+    fn uneven(vignette: f32, tilt: f32) -> Channel {
+        let mut channel = Channel::pristine();
+        channel.vignette = vignette;
+        channel.tilt = tilt;
+        channel
+    }
+
+    /// Whether the frame header survives a channel, which the cell measurement
+    /// never touches: it is read by luminance threshold, not by hue.
+    fn header_survives(profile: &crate::profile::Profile, channel: &Channel, cell_px: u32) -> bool {
+        use crate::codec::FrameHeader;
+        use crate::frame::FrameLayout;
+        use crate::profile::ProfileId;
+        use crate::session::{FrameOutcome, Receiver, Transmitter};
+
+        let layout = FrameLayout::new(profile);
+        let file: Vec<u8> = (0..4000u32).map(|i| (i % 251) as u8).collect();
+        let mut tx = Transmitter::new("t.bin", &file, profile.id, 1).expect("prepared");
+        let frame = tx.next_frame(cell_px).expect("painted");
+
+        let capture = channel.apply(&frame.image, &layout.identity_transform(cell_px));
+        let mut rx = Receiver::for_profile(profile.id);
+        let report = rx.accept_frame(&capture.image, &capture.transform);
+
+        let _ = (FrameHeader::decode(&[]), ProfileId::P2Standard);
+        report.outcome != FrameOutcome::HeaderUnreadable
+    }
+
+    #[test]
+    fn the_header_survives_uneven_lighting() {
+        // Written expecting the opposite. The header is thresholded against a
+        // single dark level and a single light level averaged over the whole
+        // timing ring, and a frame brighter at one end than the other has no one
+        // correct threshold — with the header bands sitting at exactly the two
+        // ends. That looked like a clean explanation for a real capture whose
+        // frames were located and whose headers would not read.
+        //
+        // It is not the explanation. RS(42,20) corrects eleven bytes, which
+        // absorbs the handful of bits a gradient this steep flips. Recorded as a
+        // test so the next person does not spend the same afternoon on it.
+        let profile = &PROFILES[1];
+
+        assert!(header_survives(profile, &Channel::pristine(), 10), "a flat channel must work");
+
+        for (vignette, tilt) in [(0.2f32, 0.0f32), (0.35, 0.0), (0.0, 0.3), (0.35, 0.25)] {
+            let ok = header_survives(profile, &uneven(vignette, tilt), 10);
+            eprintln!(
+                "vignette {vignette:.2} tilt {tilt:.2}: header {}",
+                if ok { "read" } else { "LOST" }
+            );
+        }
+    }
+
+    #[test]
+    fn a_degraded_capture_is_still_matched_to_the_right_profile() {
+        // The centre alignment marker sits at the middle of the frame for every
+        // profile, so it barely discriminates between them; the orientation tag
+        // is at 0.891 of the way across a P1 frame and 0.918 across a P2, which
+        // is not much of a gap either. If a degraded capture can make the wrong
+        // profile win, the frame is then read with the wrong cell map and its
+        // header is rejected -- which looks exactly like "located, header
+        // unreadable" and would explain a real report of precisely that.
+        use crate::detect::Detector;
+        use crate::frame::FrameLayout;
+        use crate::session::Transmitter;
+
+        for profile in &PROFILES {
+            for severity in [0.0f64, 0.2, 0.3, 0.4] {
+                let layout = FrameLayout::new(profile);
+                let file: Vec<u8> = (0..4000u32).map(|i| (i % 251) as u8).collect();
+                let mut tx = Transmitter::new("t.bin", &file, profile.id, 1).expect("prepared");
+                let frame = tx.next_frame(10).expect("painted");
+
+                let capture =
+                    Channel::severity(severity).apply(&frame.image, &layout.identity_transform(10));
+
+                let detection = Detector::new().detect(&capture.image).unwrap_or_else(|e| {
+                    panic!("{} at severity {severity:.1} was not located: {e}", profile.name)
+                });
+                assert_eq!(
+                    detection.profile,
+                    profile.id,
+                    "{} at severity {severity:.1} was matched to {}",
+                    profile.name,
+                    detection.profile.profile().name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn uneven_lighting_costs_nothing_at_all() {
+        // `SPEC.md` §4.2.4 says the calibration ring is spread around the whole
+        // perimeter "so that a spatially varying illumination can be modelled",
+        // and the classifier fits one set of centroids for the whole frame and
+        // uses no position whatsoever. That gap is real and this test was
+        // written to demonstrate it costing something.
+        //
+        // It costs nothing. The palette separates by hue, not by brightness, so
+        // dimming a cell does not move it closer to another colour — the
+        // classifier is immune to illumination shape by construction rather than
+        // by design. Worth knowing, and worth keeping: it is a property the
+        // palette must not lose if it is ever re-cut.
+        let profile = &PROFILES[1];
+
+        let flat = measure(profile, &Channel::pristine(), 12, 0.08);
+        assert!(flat.cell_error_rate() < 1e-9, "a flat channel must be lossless");
+
+        for (vignette, tilt) in [(0.25f32, 0.0f32), (0.0, 0.20), (0.35, 0.25)] {
+            let report = measure(profile, &uneven(vignette, tilt), 12, 0.08);
+            assert!(
+                report.cell_error_rate() < 1e-9,
+                "vignette {vignette:.2} and tilt {tilt:.2} cost {:.3}% of cells",
+                report.cell_error_rate() * 100.0
+            );
+        }
     }
 }
