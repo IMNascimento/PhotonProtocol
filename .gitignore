@@ -34,5 +34,7 @@ Thumbs.db
 # Locally generated development certificate
 /.certs/
 
-# Frames captured from a device during local diagnosis
+# Frames captured from a device during local diagnosis, and the rectified
+# frames the decoder writes when asked to explain itself
 /captures/
+/dbg/

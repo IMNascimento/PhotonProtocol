@@ -96,9 +96,23 @@ assume the receiver started recording at symbol 0.
 A frame is a square **code area** of `G x G` cells surrounded by a **quiet
 zone**. `G` is fixed by the profile (§8) and is always a multiple of 32.
 
-Each cell is a square of `S x S` device pixels. `S` MUST be a multiple of 4
-(shape masks are 4x4, §4.3.1) and SHOULD be at least 8, so that each shape
-sub-cell covers at least 2x2 pixels.
+Each cell is a square of `S x S` device pixels. `S` SHOULD be at least 8 and a
+multiple of 4, so that each of the 16 shape sub-cells (§4.3.1) covers at least
+2x2 pixels and all of them cover the same number.
+
+`S` is not always a free choice: an emitter fits the code to a screen it did not
+choose, and rounding the cell down to the next multiple of 4 can cost a fifth of
+the code's size, which a camera feels more than uneven sub-cells. So a renderer
+MUST tile the shape mask across the whole cell at whatever `S` it is given. For
+a cell whose top-left pixel is `(x, y)`, sub-cell `(i, j)` covers the pixels
+from `x + floor(j*S/4)` up to but not including `x + floor((j+1)*S/4)`
+horizontally, and the same expression in `i` vertically.
+
+Painting the mask at a fixed sub-cell size instead — `floor(S/4)` pixels each —
+leaves the right and bottom of every cell unpainted whenever `S` is not a
+multiple of 4, and at `S = 7` leaves the ink covering a third of the cell it
+should fill. A decoder averaging over the cell then sees a colour that is mostly
+background, and every cell in the frame is read wrongly and confidently.
 
 The quiet zone is 4 cells wide on all four sides and is rendered pure white
 (`#FFFFFF`). Nothing MAY be drawn in it.

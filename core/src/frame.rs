@@ -275,12 +275,26 @@ impl FrameLayout {
         let (row, col) = self.coordinates(cell);
         let x0 = (col + QUIET_ZONE_CELLS) * cell_px;
         let y0 = (row + QUIET_ZONE_CELLS) * cell_px;
-        let sub_px = cell_px / SHAPE_GRID;
+
+        // Sub-cell edges are computed from the cell's own width rather than
+        // from a rounded-down sub-cell size, so the four columns and four rows
+        // tile the cell exactly whatever the cell measures.
+        //
+        // `cell_px / SHAPE_GRID` looks equivalent and is not. At seven pixels
+        // per cell it rounds to one, and the shape is then painted into a 4x4
+        // corner of a 7x7 cell while the other two thirds stay black — a cell
+        // the sampler reads as almost entirely background. `SPEC.md` §4.1 does
+        // require the cell size to be a multiple of four, but a renderer that
+        // quietly draws the wrong thing when it is not is a worse answer than
+        // one that draws the right thing regardless.
+        let edge = |index: u32| index * cell_px / SHAPE_GRID;
 
         for y in 0..SHAPE_GRID {
+            let (top, bottom) = (edge(y), edge(y + 1));
             for x in 0..SHAPE_GRID {
+                let (left, right) = (edge(x), edge(x + 1));
                 if mask_bit(mask, y, x) {
-                    image.fill_rect(x0 + x * sub_px, y0 + y * sub_px, sub_px, sub_px, ink);
+                    image.fill_rect(x0 + left, y0 + top, right - left, bottom - top, ink);
                 }
             }
         }
@@ -770,6 +784,110 @@ mod tests {
         let widths: Vec<u32> = runs.iter().map(|(_, n)| *n).collect();
         assert_eq!(widths, vec![1, 1, 3, 1, 1], "runs were {runs:?}");
         assert!(runs[0].0, "the finder pattern must start dark");
+    }
+
+    #[test]
+    fn every_cell_size_paints_a_readable_frame() {
+        // The bug this exists for: `sub_px = cell_px / SHAPE_GRID` rounds down,
+        // so at seven pixels per cell the shape was painted into a 4x4 corner of
+        // a 7x7 cell and the rest stayed black. Frames looked plausible, decoded
+        // to nothing, and no test caught it because every test used 8, 10 or 12
+        // — two of which divide by four exactly and the third of which loses
+        // little enough to survive.
+        //
+        // The web sender picks whatever size fits the screen it is on. Seven is
+        // an ordinary answer, and so is every other number in this range.
+        for profile in &PROFILES {
+            let layout = FrameLayout::new(profile);
+            let alphabet = layout.alphabet();
+            let codeword = vec![0u8; profile.header_codeword_len() as usize];
+
+            for cell_px in 4..=16u32 {
+                let values: Vec<u16> = (0..layout.data_cells().len())
+                    .map(|i| u16::try_from(i % alphabet.len()).unwrap())
+                    .collect();
+                let image = layout.render(&codeword, &values, cell_px);
+                let transform = layout.identity_transform(cell_px);
+
+                let calibration: Vec<_> = layout
+                    .calibration_cells()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &cell)| {
+                        (layout.calibration_value(i), layout.sample_cell(&image, &transform, cell))
+                    })
+                    .collect();
+                let classifier = crate::symbol::Classifier::fit(alphabet, &calibration);
+
+                let wrong = layout
+                    .data_cells()
+                    .iter()
+                    .zip(values.iter())
+                    .filter(|(cell, want)| {
+                        let sample = layout.sample_cell(&image, &transform, **cell);
+                        classifier.classify(&sample).value != **want
+                    })
+                    .count();
+
+                // At or above the size the specification recommends, a frame
+                // read back from its own pixels must be exact. Below it a
+                // sub-cell is a single pixel and the sampler's taps land on
+                // boundaries, which costs a handful of cells out of fourteen
+                // thousand — far inside what the parity repairs, and nothing
+                // like the third of a frame the rounding bug cost.
+                let rate = wrong as f64 / values.len() as f64;
+                if cell_px >= 8 {
+                    assert_eq!(
+                        wrong,
+                        0,
+                        "{} at {cell_px} px per cell misread {wrong} of {}",
+                        profile.name,
+                        values.len()
+                    );
+                } else {
+                    assert!(
+                        rate < 0.001,
+                        "{} at {cell_px} px per cell misread {:.3}% of cells",
+                        profile.name,
+                        rate * 100.0
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_painted_cell_is_filled_edge_to_edge() {
+        // The direct statement of the same fault: whatever the cell measures,
+        // the four sub-cell columns and rows must tile it exactly. A shape drawn
+        // into part of a cell leaves the rest as background, and background is a
+        // colour the classifier believes.
+        let layout = FrameLayout::new(&PROFILES[1]);
+        let alphabet = layout.alphabet();
+
+        for cell_px in 4..=16u32 {
+            // Shape 0 of the 8-shape alphabet is 0x00FF: the top half solid.
+            let value = alphabet.join(3, 0);
+            let values = vec![value; layout.data_cells().len()];
+            let image = layout.render(&[0u8; 42], &values, cell_px);
+
+            let cell = layout.data_cells()[0];
+            let (row, col) = layout.coordinates(cell);
+            let x0 = (col + QUIET_ZONE_CELLS) * cell_px;
+            let y0 = (row + QUIET_ZONE_CELLS) * cell_px;
+
+            // The top half of the cell must be ink across its whole width.
+            let half = cell_px / 2;
+            for x in 0..cell_px {
+                for y in 0..half {
+                    assert_ne!(
+                        image.get(x0 + x, y0 + y),
+                        Rgb::BLACK,
+                        "at {cell_px} px per cell, ({x}, {y}) of a filled half was background"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
