@@ -42,6 +42,7 @@ pub mod frame;
 pub mod geom;
 pub mod image;
 pub mod profile;
+pub mod session;
 pub mod symbol;
 pub mod transport;
 

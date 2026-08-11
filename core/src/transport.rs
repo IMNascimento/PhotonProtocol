@@ -156,44 +156,56 @@ impl TransportEncoder {
         self.encoder.get_block_encoders().iter().map(|b| b.source_packets().len()).sum()
     }
 
+    /// Every source symbol, round-robin across blocks and already serialised.
+    ///
+    /// This is the first pass of an emission loop (`SPEC.md` §6).
+    #[must_use]
+    pub fn source_symbols(&self) -> Vec<Vec<u8>> {
+        let per_block: Vec<Vec<EncodingPacket>> = self
+            .encoder
+            .get_block_encoders()
+            .iter()
+            .map(raptorq::SourceBlockEncoder::source_packets)
+            .collect();
+        round_robin(&per_block)
+    }
+
+    /// A batch of repair symbols, `count` from each block, starting at
+    /// `start_id`.
+    ///
+    /// Encoding Symbol IDs have to keep rising for the whole session, so the
+    /// caller owns that counter rather than this type guessing at it.
+    #[must_use]
+    pub fn repair_symbols(&self, start_id: u32, count: u32) -> Vec<Vec<u8>> {
+        let per_block: Vec<Vec<EncodingPacket>> = self
+            .encoder
+            .get_block_encoders()
+            .iter()
+            .map(|block| block.repair_packets(start_id, count))
+            .collect();
+        round_robin(&per_block)
+    }
+
+    /// Repair symbols to generate per block each time a caller runs dry.
+    #[must_use]
+    pub const fn repair_batch(&self) -> u32 {
+        REPAIR_BATCH
+    }
+
     /// The endless stream of symbols, each serialised as a FEC Payload ID
     /// followed by its body.
     #[must_use]
     pub fn stream(&self) -> SymbolStream<'_> {
-        let mut stream =
-            SymbolStream { encoder: &self.encoder, pending: Vec::new(), cursor: 0, next_repair: 0 };
-        stream.refill_with_source();
-        stream
+        SymbolStream { encoder: self, pending: self.source_symbols(), cursor: 0, next_repair: 0 }
     }
 }
 
 /// An iterator over encoding symbols that never ends.
 pub struct SymbolStream<'a> {
-    encoder: &'a Encoder,
-    pending: Vec<EncodingPacket>,
+    encoder: &'a TransportEncoder,
+    pending: Vec<Vec<u8>>,
     cursor: usize,
     next_repair: u32,
-}
-
-impl SymbolStream<'_> {
-    /// Loads the first pass: every source symbol, round-robin across blocks.
-    fn refill_with_source(&mut self) {
-        let blocks = self.encoder.get_block_encoders();
-        let per_block: Vec<Vec<EncodingPacket>> =
-            blocks.iter().map(raptorq::SourceBlockEncoder::source_packets).collect();
-        self.pending = round_robin(per_block);
-        self.cursor = 0;
-    }
-
-    /// Loads the next batch of repair symbols, again round-robin.
-    fn refill_with_repair(&mut self) {
-        let blocks = self.encoder.get_block_encoders();
-        let per_block: Vec<Vec<EncodingPacket>> =
-            blocks.iter().map(|b| b.repair_packets(self.next_repair, REPAIR_BATCH)).collect();
-        self.next_repair = self.next_repair.saturating_add(REPAIR_BATCH);
-        self.pending = round_robin(per_block);
-        self.cursor = 0;
-    }
 }
 
 impl Iterator for SymbolStream<'_> {
@@ -201,28 +213,30 @@ impl Iterator for SymbolStream<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.cursor >= self.pending.len() {
-            self.refill_with_repair();
+            self.pending = self.encoder.repair_symbols(self.next_repair, REPAIR_BATCH);
+            self.next_repair = self.next_repair.saturating_add(REPAIR_BATCH);
+            self.cursor = 0;
             if self.pending.is_empty() {
                 return None;
             }
         }
-        let packet = self.pending.get(self.cursor)?;
+        let symbol = self.pending.get(self.cursor)?.clone();
         self.cursor += 1;
-        Some(packet.serialize())
+        Some(symbol)
     }
 }
 
 /// Interleaves per-block packet lists so consecutive symbols come from
-/// different source blocks.
-fn round_robin(mut per_block: Vec<Vec<EncodingPacket>>) -> Vec<EncodingPacket> {
+/// different source blocks, and serialises them.
+fn round_robin(per_block: &[Vec<EncodingPacket>]) -> Vec<Vec<u8>> {
     let longest = per_block.iter().map(Vec::len).max().unwrap_or(0);
     let total: usize = per_block.iter().map(Vec::len).sum();
     let mut out = Vec::with_capacity(total);
 
     for index in 0..longest {
-        for block in &mut per_block {
-            if index < block.len() {
-                out.push(block[index].clone());
+        for block in per_block {
+            if let Some(packet) = block.get(index) {
+                out.push(packet.serialize());
             }
         }
     }

@@ -497,6 +497,60 @@ fn bit_at(bytes: &[u8], index: usize) -> bool {
     }
 }
 
+/// Spreads a byte stream across cell values, `bits` bits each (`SPEC.md` §4.4).
+///
+/// Values are taken most significant bit first from a bit stream that is itself
+/// filled most significant bit first, so the packing is the same convention end
+/// to end. Cells past the end of the byte stream carry zero, which is what the
+/// specification requires of the frame's unused tail.
+#[must_use]
+pub fn bytes_to_cells(bytes: &[u8], bits: u32, cell_count: usize) -> Vec<u16> {
+    let mut cells = Vec::with_capacity(cell_count);
+    for index in 0..cell_count {
+        let start = index * bits as usize;
+        let mut value = 0u16;
+        for offset in 0..bits as usize {
+            value = (value << 1) | u16::from(bit_at(bytes, start + offset));
+        }
+        cells.push(value);
+    }
+    cells
+}
+
+/// Gathers cell values back into a byte stream, the inverse of
+/// [`bytes_to_cells`].
+#[must_use]
+pub fn cells_to_bytes(cells: &[u16], bits: u32, byte_len: usize) -> Vec<u8> {
+    let mut bytes = vec![0u8; byte_len];
+    for (index, &value) in cells.iter().enumerate() {
+        let start = index * bits as usize;
+        for offset in 0..bits as usize {
+            let bit = (value >> (bits as usize - 1 - offset)) & 1;
+            if bit == 0 {
+                continue;
+            }
+            let position = start + offset;
+            if let Some(byte) = bytes.get_mut(position / 8) {
+                *byte |= 1 << (7 - position % 8);
+            }
+        }
+    }
+    bytes
+}
+
+/// The byte positions a cell's bits land in.
+///
+/// A cell of 4, 5 or 6 bits rarely aligns to a byte, so a single unreliable cell
+/// can taint two bytes. Erasure decoding needs every byte the cell touched, not
+/// just the first: leaving the second unmarked would point the corrector at the
+/// wrong half of the damage.
+#[must_use]
+pub fn cell_byte_span(index: usize, bits: u32) -> (usize, usize) {
+    let first_bit = index * bits as usize;
+    let last_bit = first_bit + bits as usize - 1;
+    (first_bit / 8, last_bit / 8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,6 +755,40 @@ mod tests {
             }
             assert!(wrong.is_empty(), "{} misread: {:?}", profile.name, wrong.first());
         }
+    }
+
+    #[test]
+    fn bit_packing_round_trips_at_every_width() {
+        for bits in [4u32, 5, 6] {
+            let byte_len = 97usize;
+            let bytes: Vec<u8> = (0..byte_len).map(|i| u8::try_from(i % 251).unwrap()).collect();
+            let cell_count = byte_len * 8 / bits as usize;
+
+            let cells = bytes_to_cells(&bytes, bits, cell_count);
+            assert_eq!(cells.len(), cell_count);
+            assert!(cells.iter().all(|&v| v < (1 << bits)), "{bits} bits produced a wide value");
+
+            let back = cells_to_bytes(&cells, bits, byte_len);
+            // The trailing bits of the last byte may fall outside the cells, so
+            // compare only the bytes the cells actually cover.
+            let covered = cell_count * bits as usize / 8;
+            assert_eq!(&back[..covered], &bytes[..covered], "{bits} bits did not round trip");
+        }
+    }
+
+    #[test]
+    fn a_cell_that_straddles_a_byte_boundary_taints_both() {
+        // Erasure decoding needs every byte a doubtful cell touched. Marking
+        // only the first would point the corrector at half the damage and leave
+        // the rest, which is worse than not marking it at all.
+        assert_eq!(cell_byte_span(0, 5), (0, 0));
+        assert_eq!(cell_byte_span(1, 5), (0, 1));
+        assert_eq!(cell_byte_span(2, 5), (1, 1));
+        assert_eq!(cell_byte_span(3, 5), (1, 2));
+
+        // Four bits always fit inside one byte; six bits straddle two.
+        assert_eq!(cell_byte_span(1, 4), (0, 0));
+        assert_eq!(cell_byte_span(1, 6), (0, 1));
     }
 
     #[test]
