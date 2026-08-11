@@ -14,6 +14,14 @@ authors.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# `wasm-opt` is disabled here and run explicitly by the deployment workflow
+# instead. The binaryen build wasm-pack downloads crashes on Windows, and a
+# packaging step that fails on a contributor's machine is worse than one that
+# produces a larger artefact: the size only matters on the copy that is
+# actually served, and that copy is built on Linux by CI.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
 [dependencies]
 photon-core.workspace = true
 wasm-bindgen = "0.2"

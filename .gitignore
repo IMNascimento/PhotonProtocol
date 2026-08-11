@@ -26,3 +26,7 @@ yarn-error.log*
 *.swp
 .DS_Store
 Thumbs.db
+
+# Assembled site and the Node-target wasm package, both derived
+/site/
+/wasm/pkg-node/

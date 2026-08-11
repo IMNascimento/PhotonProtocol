@@ -61,6 +61,12 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
+# The browser bundle is optimised for size, the command line for speed. They
+# want opposite things from the same code: one is downloaded over the connection
+# its user is trying to avoid, the other grinds through thousands of frames.
+[profile.release.package.photon-wasm]
+opt-level = "z"
+
 # The decoder is the expensive half and is always built in release, but it is
 # also the half that needs a debugger. Keep symbols.
 [profile.release.package.photon-cli]
