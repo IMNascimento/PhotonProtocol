@@ -43,6 +43,7 @@ pub mod geom;
 pub mod image;
 pub mod profile;
 pub mod symbol;
+pub mod transport;
 
 pub use error::{Error, Result};
 pub use frame::{FrameLayout, Region};
