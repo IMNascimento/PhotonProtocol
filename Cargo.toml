@@ -1,9 +1,9 @@
-﻿[workspace]
+[workspace]
 resolver = "3"
 members = ["core", "cli", "wasm"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 # Set by `raptorq`, not by this code: it uses `let` chains and AVX-512
 # intrinsics, both of which stabilised well after the 1.85 that edition 2024
@@ -16,7 +16,7 @@ homepage = "https://github.com/IMNascimento/PhotonProtocol"
 authors = ["Igor Nascimento and the PhotonProtocol contributors"]
 
 [workspace.dependencies]
-photon-core = { path = "core", version = "0.2.0" }
+photon-core = { path = "core", version = "0.3.0" }
 
 [workspace.lints.rust]
 missing_docs = "warn"

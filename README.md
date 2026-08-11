@@ -43,23 +43,26 @@ correctness.
 
 ## Status
 
-**Phase 1 complete.** A file goes in one end and comes out the other, digest
-verified, through a distorted synthetic channel — with the receiver handed
-pictures and finding the code in them for itself. The wire format is unstable
-until [`SPEC.md`](SPEC.md) is tagged `1.0`, and drafts are not interoperable
-with each other.
+**Try it: [imnascimento.github.io/PhotonProtocol](https://imnascimento.github.io/PhotonProtocol/)**
+— open the sender on one device, film it with another, and give the recording
+to the receiver. Both pages run entirely on your device.
+
+The wire format is unstable until [`SPEC.md`](SPEC.md) is tagged `1.0`, and
+drafts are not interoperable with each other.
 
 | Phase | Deliverable | State |
 | --- | --- | --- |
 | 0 | Specification draft, workspace, CI | done |
 | 1 | Encoder, decoder, frame detection, synthetic channel simulator | done |
-| 2 | Bench command line, first decode of real camera footage | next |
-| 3 | Emitter page | |
-| 4 | Decoder page, deployed to GitHub Pages | |
+| 2 | Bench command line, `photon encode` / `photon decode` | tooling done; **no real footage decoded yet** |
+| 3 | Sender page | done |
+| 4 | Receiver page, deployed to GitHub Pages | done |
 | 5 | Optimisation, driven by phase 1 and 2 measurements | |
 
-Nothing has yet been filmed. Everything measured so far is against a *modelled*
-camera, and phase 2 is where that model meets a real one.
+**Nothing has been filmed yet.** Every measurement so far is against a
+*modelled* camera. The moment a real recording is decoded, several of the
+numbers in [`docs/phase-1-report.md`](docs/phase-1-report.md) should be expected
+to move, and the profile table with them.
 
 No throughput figure is quoted here on purpose. The target is to beat the
 state of the art, but the number that goes in this README will be one that was
@@ -112,25 +115,43 @@ SPEC.md          the protocol — the actual product
 core/            photon-core: the protocol, no I/O, no platform
 cli/             photon-cli: bench command line, where numbers get measured
 wasm/            photon-wasm: WebAssembly bindings, an adapter and nothing more
-tools/           independent derivations of every constant in the spec
-web-emitter/     the sending page          (phase 3)
-web-decoder/     the receiving page        (phase 4)
+tools/           independent derivations of every constant, plus the site build
+web-shared/      landing page and the one stylesheet
+web-emitter/     the sending page
+web-decoder/     the receiving page
 ```
+
+## Using it from a desktop
+
+```bash
+cargo run --release -p photon-cli -- encode report.pdf --video
+# display report-frames/photon.mp4, or the PNGs, on a screen and film it
+
+cargo run --release -p photon-cli -- decode recording.mp4 --out .
+```
+
+`decode` prints what happened rather than only whether it worked: how many
+frames were located, how many survived, how many were duplicates, and two
+throughput figures — one over the whole recording, one over the frames it
+actually needed. Reading a directory of extracted frames works too, and needs no
+`ffmpeg`.
 
 ## Building
 
 Requires a stable Rust toolchain. `rust-toolchain.toml` pins the rest.
+`ffmpeg` is needed only for reading and writing video.
 
 ```bash
 cargo test --workspace         # includes the specification's own test vectors
 cargo run -p photon-cli -- profiles
 ```
 
-For the WebAssembly build:
+For the site:
 
 ```bash
-cargo build -p photon-wasm --target wasm32-unknown-unknown
-wasm-pack build wasm --target web
+wasm-pack build wasm --release --target web --out-dir pkg
+node tools/build-site.mjs site
+python -m http.server -d site 8080     # then open http://localhost:8080
 ```
 
 The tools that derive the specification's constants need only Node:

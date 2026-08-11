@@ -45,23 +45,26 @@ correção.
 
 ## Situação atual
 
-**Fase 1 concluída.** Um arquivo entra por uma ponta e sai pela outra, com
-resumo conferido, atravessando um canal sintético distorcido — e o receptor
-recebe imagens e encontra o código nelas sozinho. O formato é instável até que
-[`SPEC.md`](SPEC.md) receba a tag `1.0`, e rascunhos não são interoperáveis
-entre si.
+**Teste agora: [imnascimento.github.io/PhotonProtocol](https://imnascimento.github.io/PhotonProtocol/)**
+— abra a página emissora num aparelho, filme com outro, e entregue a gravação
+à página receptora. Ambas rodam inteiramente no seu aparelho.
+
+O formato é instável até que [`SPEC.md`](SPEC.md) receba a tag `1.0`, e
+rascunhos não são interoperáveis entre si.
 
 | Fase | Entrega | Estado |
 | --- | --- | --- |
 | 0 | Rascunho da especificação, workspace, CI | concluída |
 | 1 | Codificador, decodificador, detecção de quadro, simulador de canal | concluída |
-| 2 | CLI de bancada, primeira decodificação de vídeo real | próxima |
-| 3 | Página emissora | |
-| 4 | Página decodificadora, publicada no GitHub Pages | |
+| 2 | CLI de bancada, `photon encode` / `photon decode` | ferramenta pronta; **nenhum vídeo real decodificado ainda** |
+| 3 | Página emissora | concluída |
+| 4 | Página decodificadora, publicada no GitHub Pages | concluída |
 | 5 | Otimização, guiada pelas medições das fases 1 e 2 | |
 
-Nada foi filmado ainda. Tudo o que foi medido até aqui é contra uma câmera
-**modelada**, e a fase 2 é onde esse modelo encontra uma real.
+**Nada foi filmado ainda.** Toda medição até aqui é contra uma câmera
+**modelada**. No momento em que uma gravação real for decodificada, vários dos
+números em [`docs/phase-1-report.md`](docs/phase-1-report.md) devem se mover, e
+a tabela de perfis junto.
 
 Nenhum número de throughput aparece aqui de propósito. A meta é superar o
 estado da arte, mas o número que entrar neste README será um número **medido**
@@ -115,25 +118,43 @@ SPEC.md          o protocolo — o produto de verdade
 core/            photon-core: o protocolo, sem I/O, sem plataforma
 cli/             photon-cli: CLI de bancada, onde os números são medidos
 wasm/            photon-wasm: bindings WebAssembly, um adaptador e nada mais
-tools/           derivações independentes de cada constante da especificação
-web-emitter/     a página que envia        (fase 3)
-web-decoder/     a página que recebe       (fase 4)
+tools/           derivações independentes de cada constante, e o build do site
+web-shared/      página inicial e a folha de estilo única
+web-emitter/     a página que envia
+web-decoder/     a página que recebe
 ```
+
+## Usando pelo desktop
+
+```bash
+cargo run --release -p photon-cli -- encode relatorio.pdf --video
+# exiba relatorio-frames/photon.mp4, ou os PNGs, numa tela e filme
+
+cargo run --release -p photon-cli -- decode gravacao.mp4 --out .
+```
+
+O `decode` imprime o que aconteceu, não apenas se funcionou: quantos quadros
+foram localizados, quantos sobreviveram, quantos eram duplicados, e dois
+números de throughput — um sobre a gravação inteira, outro sobre os quadros de
+que realmente precisou. Também lê um diretório de quadros extraídos, sem
+precisar de `ffmpeg`.
 
 ## Compilando
 
 Requer um toolchain Rust estável. O `rust-toolchain.toml` cuida do resto.
+O `ffmpeg` só é necessário para ler e escrever vídeo.
 
 ```bash
 cargo test --workspace         # inclui os vetores de teste da especificação
 cargo run -p photon-cli -- profiles
 ```
 
-Para o build WebAssembly:
+Para o site:
 
 ```bash
-cargo build -p photon-wasm --target wasm32-unknown-unknown
-wasm-pack build wasm --target web
+wasm-pack build wasm --release --target web --out-dir pkg
+node tools/build-site.mjs site
+python -m http.server -d site 8080     # depois abra http://localhost:8080
 ```
 
 As ferramentas que derivam as constantes da especificação precisam só de Node:
