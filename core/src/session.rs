@@ -283,6 +283,28 @@ impl FrameReport {
     }
 }
 
+/// Everything one picture yielded, before it is folded into a transfer.
+///
+/// Produced by [`Receiver::examine`] and consumed by [`Receiver::absorb`]. The
+/// split exists so the expensive half can run anywhere — across cores, or off a
+/// browser's main thread — while the half that depends on frame order stays
+/// where it must.
+#[derive(Debug, Clone)]
+pub struct FrameReading {
+    /// How far the read got.
+    pub outcome: FrameOutcome,
+    /// The header, when it was readable.
+    pub header: Option<FrameHeader>,
+    /// Units whose checksum verified.
+    pub units: Vec<PayloadUnit>,
+    /// Units dropped as corrupt.
+    pub units_rejected: usize,
+    /// Cells the classifier was unsure of.
+    pub doubtful_cells: usize,
+    /// Payload cells in the frame.
+    pub total_cells: usize,
+}
+
 /// A file rebuilt from a recording.
 #[derive(Debug, Clone)]
 pub struct ReceivedFile {
@@ -354,20 +376,7 @@ impl Receiver {
     /// starts before the phone is pointed at anything — so failing to locate one
     /// is an ordinary outcome rather than an error.
     pub fn accept_image(&mut self, image: &RgbImage) -> FrameReport {
-        if let Ok(detection) = self.detector.detect(image) {
-            return self.accept_frame(image, &detection.transform);
-        }
-
-        self.frames_seen += 1;
-        FrameReport {
-            outcome: FrameOutcome::NotLocated,
-            header: None,
-            units_accepted: 0,
-            units_rejected: 0,
-            new_symbols: 0,
-            doubtful_cells: 0,
-            total_cells: self.layout.data_cells().len(),
-        }
+        self.absorb(self.examine(image))
     }
 
     /// Offers one already-located frame.
@@ -376,22 +385,55 @@ impl Receiver {
     /// rather than a located frame want [`Receiver::accept_image`]; this exists
     /// for tests and for callers doing their own detection.
     pub fn accept_frame(&mut self, image: &RgbImage, transform: &Homography) -> FrameReport {
+        self.absorb(self.read_frame(image, transform))
+    }
+
+    /// Reads everything a single picture can yield, changing nothing.
+    ///
+    /// This is where a frame's cost lies — detection, per-cell classification
+    /// and error correction — and none of it depends on any other frame. Keeping
+    /// it free of the receiver's state is what lets a video be decoded across
+    /// every core at once, and what lets a browser do the same work off the main
+    /// thread. The order-dependent part, which is small, is [`Receiver::absorb`].
+    #[must_use]
+    pub fn examine(&self, image: &RgbImage) -> FrameReading {
+        match self.detector.detect(image) {
+            Ok(detection) => self.read_frame(image, &detection.transform),
+            Err(_) => FrameReading {
+                outcome: FrameOutcome::NotLocated,
+                header: None,
+                units: Vec::new(),
+                units_rejected: 0,
+                doubtful_cells: 0,
+                total_cells: self.layout.data_cells().len(),
+            },
+        }
+    }
+
+    /// Folds a reading into the transfer.
+    ///
+    /// Everything here depends on what came before: which session was locked
+    /// onto, which frames have already been seen, which symbols are new. It is
+    /// cheap, and it is the only part that has to happen in order.
+    pub fn absorb(&mut self, reading: FrameReading) -> FrameReport {
         self.frames_seen += 1;
 
         let mut report = FrameReport {
-            outcome: FrameOutcome::HeaderUnreadable,
-            header: None,
+            outcome: reading.outcome,
+            header: reading.header,
             units_accepted: 0,
-            units_rejected: 0,
+            units_rejected: reading.units_rejected,
             new_symbols: 0,
-            doubtful_cells: 0,
-            total_cells: self.layout.data_cells().len(),
+            doubtful_cells: reading.doubtful_cells,
+            total_cells: reading.total_cells,
         };
 
-        let Some(header) = self.read_header(image, transform) else {
+        let Some(header) = reading.header else {
             return report;
         };
-        report.header = Some(header);
+        if reading.outcome != FrameOutcome::Decoded {
+            return report;
+        }
 
         match self.session_id {
             Some(known) if known != header.session_id => {
@@ -407,45 +449,8 @@ impl Receiver {
             return report;
         }
 
-        // The classifier is fitted to this frame's own calibration ring, never
-        // to the nominal palette: exposure and white balance move while the
-        // camera records, so references from any other frame are already stale.
-        let classifier = self.fit_classifier(image, transform);
-        let bits = self.layout.profile().bits_per_cell();
-
-        let mut cells = Vec::with_capacity(self.layout.data_cells().len());
-        let mut doubtful = Vec::new();
-        for (index, &cell) in self.layout.data_cells().iter().enumerate() {
-            let sample = self.layout.sample_cell(image, transform, cell);
-            let call = classifier.classify(&sample);
-            cells.push(call.value);
-            if call.confidence < ERASURE_CONFIDENCE {
-                doubtful.push(index);
-            }
-        }
-        report.doubtful_cells = doubtful.len();
-
-        let raw = cells_to_bytes(&cells, bits, self.payload_codec.raw_len());
-        let erasures = Self::erasure_positions(&doubtful, bits);
-
-        // Erasure hints come from a heuristic. If they do not help, the same
-        // frame may still decode without them, and a frame given up on is one
-        // somebody has to film again.
-        let Ok(payload) = self
-            .payload_codec
-            .decode(&raw, &erasures)
-            .or_else(|_| self.payload_codec.decode(&raw, &[]))
-        else {
-            report.outcome = FrameOutcome::PayloadUnrecoverable;
-            return report;
-        };
-
-        let (units, rejected) = parse_units(&payload, usize::from(header.payload_len));
-        report.units_accepted = units.len();
-        report.units_rejected = rejected;
-        report.outcome = FrameOutcome::Decoded;
-
-        for unit in units {
+        report.units_accepted = reading.units.len();
+        for unit in reading.units {
             match unit.kind {
                 unit_type::MANIFEST => self.take_manifest(&unit.data),
                 unit_type::RQ_SYMBOL => {
@@ -465,6 +470,62 @@ impl Receiver {
             self.frames_used += 1;
         }
         report
+    }
+
+    /// Reads a located frame down to its payload units.
+    fn read_frame(&self, image: &RgbImage, transform: &Homography) -> FrameReading {
+        let mut reading = FrameReading {
+            outcome: FrameOutcome::HeaderUnreadable,
+            header: None,
+            units: Vec::new(),
+            units_rejected: 0,
+            doubtful_cells: 0,
+            total_cells: self.layout.data_cells().len(),
+        };
+
+        let Some(header) = self.read_header(image, transform) else {
+            return reading;
+        };
+        reading.header = Some(header);
+
+        // The classifier is fitted to this frame's own calibration ring, never
+        // to the nominal palette: exposure and white balance move while the
+        // camera records, so references from any other frame are already stale.
+        let classifier = self.fit_classifier(image, transform);
+        let bits = self.layout.profile().bits_per_cell();
+
+        let mut cells = Vec::with_capacity(self.layout.data_cells().len());
+        let mut doubtful = Vec::new();
+        for (index, &cell) in self.layout.data_cells().iter().enumerate() {
+            let sample = self.layout.sample_cell(image, transform, cell);
+            let call = classifier.classify(&sample);
+            cells.push(call.value);
+            if call.confidence < ERASURE_CONFIDENCE {
+                doubtful.push(index);
+            }
+        }
+        reading.doubtful_cells = doubtful.len();
+
+        let raw = cells_to_bytes(&cells, bits, self.payload_codec.raw_len());
+        let erasures = Self::erasure_positions(&doubtful, bits);
+
+        // Erasure hints come from a heuristic. If they do not help, the same
+        // frame may still decode without them, and a frame given up on is one
+        // somebody has to film again.
+        let Ok(payload) = self
+            .payload_codec
+            .decode(&raw, &erasures)
+            .or_else(|_| self.payload_codec.decode(&raw, &[]))
+        else {
+            reading.outcome = FrameOutcome::PayloadUnrecoverable;
+            return reading;
+        };
+
+        let (units, rejected) = parse_units(&payload, usize::from(header.payload_len));
+        reading.units = units;
+        reading.units_rejected = rejected;
+        reading.outcome = FrameOutcome::Decoded;
+        reading
     }
 
     /// Rebuilds the file.
