@@ -267,6 +267,12 @@ pub struct FrameReport {
     pub doubtful_cells: usize,
     /// Payload cells in the frame, for turning the above into a rate.
     pub total_cells: usize,
+    /// Camera pixels per cell, when the frame was located.
+    ///
+    /// The number that decides whether a capture can work at all, and the one a
+    /// user can actually act on: it rises by stepping closer. See
+    /// [`crate::detect::Detection::pixels_per_cell`].
+    pub pixels_per_cell: Option<f64>,
 }
 
 impl FrameReport {
@@ -303,6 +309,8 @@ pub struct FrameReading {
     pub doubtful_cells: usize,
     /// Payload cells in the frame.
     pub total_cells: usize,
+    /// Camera pixels per cell, when the frame was located.
+    pub pixels_per_cell: Option<f64>,
 }
 
 /// A file rebuilt from a recording.
@@ -398,7 +406,11 @@ impl Receiver {
     #[must_use]
     pub fn examine(&self, image: &RgbImage) -> FrameReading {
         match self.detector.detect(image) {
-            Ok(detection) => self.read_frame(image, &detection.transform),
+            Ok(detection) => {
+                let mut reading = self.read_frame(image, &detection.transform);
+                reading.pixels_per_cell = Some(detection.pixels_per_cell());
+                reading
+            }
             Err(_) => FrameReading {
                 outcome: FrameOutcome::NotLocated,
                 header: None,
@@ -406,6 +418,7 @@ impl Receiver {
                 units_rejected: 0,
                 doubtful_cells: 0,
                 total_cells: self.layout.data_cells().len(),
+                pixels_per_cell: None,
             },
         }
     }
@@ -426,6 +439,7 @@ impl Receiver {
             new_symbols: 0,
             doubtful_cells: reading.doubtful_cells,
             total_cells: reading.total_cells,
+            pixels_per_cell: reading.pixels_per_cell,
         };
 
         let Some(header) = reading.header else {
@@ -481,6 +495,7 @@ impl Receiver {
             units_rejected: 0,
             doubtful_cells: 0,
             total_cells: self.layout.data_cells().len(),
+            pixels_per_cell: None,
         };
 
         let Some(header) = self.read_header(image, transform) else {

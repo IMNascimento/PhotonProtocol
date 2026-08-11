@@ -220,16 +220,25 @@ impl Receiver {
         };
 
         let (accepted, needed) = self.inner.progress().unwrap_or((0, 0));
+
+        // `null` rather than a placeholder when the frame was not located: a
+        // page showing "0.0 pixels per cell" would be reporting a measurement
+        // that was never taken.
+        let per_cell =
+            report.pixels_per_cell.map_or_else(|| "null".to_owned(), |value| format!("{value:.2}"));
+
         Ok(format!(
             concat!(
                 r#"{{"outcome":"{}","newSymbols":{},"unitsAccepted":{},"unitsRejected":{},"#,
-                r#""doubtfulRate":{:.5},"accepted":{},"needed":{},"complete":{}}}"#
+                r#""doubtfulRate":{:.5},"pixelsPerCell":{},"accepted":{},"needed":{},"#,
+                r#""complete":{}}}"#
             ),
             outcome,
             report.new_symbols,
             report.units_accepted,
             report.units_rejected,
             report.doubtful_rate(),
+            per_cell,
             accepted,
             needed,
             self.inner.is_complete(),

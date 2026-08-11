@@ -27,9 +27,19 @@ struct Tally {
     new_symbols: usize,
     doubtful_cells: usize,
     total_cells: usize,
+    pixels_per_cell: f64,
+    located: usize,
 }
 
 impl Tally {
+    /// Mean camera pixels per cell across the frames that were located.
+    ///
+    /// The measurement `SPEC.md` Q1 asks for, and the one that explains most
+    /// failed captures on its own.
+    fn pixels_per_cell(&self) -> f64 {
+        if self.located == 0 { 0.0 } else { self.pixels_per_cell / self.located as f64 }
+    }
+
     fn doubtful_rate(&self) -> f64 {
         if self.total_cells == 0 {
             0.0
@@ -78,6 +88,7 @@ pub(crate) fn run(
                 units_rejected: 0,
                 doubtful_cells: 0,
                 total_cells: 0,
+                pixels_per_cell: None,
             },
         })
         .collect();
@@ -92,6 +103,10 @@ pub(crate) fn run(
         tally.doubtful_cells += report.doubtful_cells;
         tally.total_cells += report.total_cells;
         tally.new_symbols += report.new_symbols;
+        if let Some(per_cell) = report.pixels_per_cell {
+            tally.pixels_per_cell += per_cell;
+            tally.located += 1;
+        }
 
         match report.outcome {
             FrameOutcome::NotLocated => tally.not_located += 1,
@@ -134,8 +149,16 @@ pub(crate) fn run(
             println!("                {error}");
             if error.is_recoverable_by_more_capture() {
                 println!();
-                println!("This is the kind of failure more filming fixes. Fill more of the");
-                println!("frame with the screen, hold steadier, and keep recording longer.");
+                if tally.located > 0 && tally.pixels_per_cell() < 5.0 {
+                    println!(
+                        "At {:.1} pixels per cell the screen was too small in the shot for the",
+                        tally.pixels_per_cell()
+                    );
+                    println!("cell alphabet to be separable. Get closer before anything else.");
+                } else {
+                    println!("This is the kind of failure more filming fixes. Fill more of the");
+                    println!("frame with the screen, hold steadier, and keep recording longer.");
+                }
             }
             Err(format!("decode failed: {error}"))
         }
@@ -173,6 +196,9 @@ fn print_frame_report(tally: &Tally) {
     println!("{:<16}{:>8}", "payload lost", tally.payload_lost);
     println!("{:<16}{:>8}", "other session", tally.wrong_session);
     println!();
+    if tally.located > 0 {
+        println!("Pixels per cell {:.2}", tally.pixels_per_cell());
+    }
     println!("Doubtful cells  {:.3}%", tally.doubtful_rate() * 100.0);
     println!("New symbols     {}", tally.new_symbols);
 }

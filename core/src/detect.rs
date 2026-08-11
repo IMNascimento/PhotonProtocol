@@ -23,7 +23,7 @@
 //! onto nothing, and everything downstream reads noise with full conviction.
 
 use crate::error::{Error, Result};
-use crate::frame::FrameLayout;
+use crate::frame::{FINDER_PATTERN, FrameLayout};
 use crate::geom::{Homography, Point};
 use crate::image::RgbImage;
 use crate::profile::{PROFILES, ProfileId};
@@ -92,6 +92,34 @@ pub struct Detection {
     /// Not a probability. It is here so a caller looking at several candidate
     /// frames in a video can prefer the one the format itself agreed with most.
     pub confidence: f64,
+}
+
+impl Detection {
+    /// Camera pixels the code area spans per cell.
+    ///
+    /// The single most useful number about a capture, and the one `SPEC.md` Q1
+    /// asks to be measured rather than assumed. It decides everything
+    /// downstream: below roughly four the shape alphabet stops being separable
+    /// whatever else is right, and no amount of error correction substitutes for
+    /// pixels that were never recorded.
+    ///
+    /// Averaged over all four edges of the quadrilateral, so a frame seen at an
+    /// angle reports what it has on average rather than at its nearest corner.
+    #[must_use]
+    pub fn pixels_per_cell(&self) -> f64 {
+        // Finder centres sit 3.5 cells in from each corner, so the distance
+        // between two of them spans `grid - 7` cells.
+        let span = f64::from(self.profile.profile().grid) - f64::from(FINDER_PATTERN);
+        if span <= 0.0 {
+            return 0.0;
+        }
+
+        let mut total = 0.0;
+        for index in 0..4 {
+            total += self.corners[index].distance(self.corners[(index + 1) % 4]);
+        }
+        total / 4.0 / span
+    }
 }
 
 /// Locates frames in images.
@@ -881,6 +909,41 @@ mod tests {
         image.fill_rect(cx - 40, cy - 40, 80, 80, Rgb::WHITE);
 
         assert!(Detector::new().detect(&image).is_err(), "a defaced alignment marker was accepted");
+    }
+
+    #[test]
+    fn pixels_per_cell_matches_what_was_painted() {
+        // The number a user is shown while aiming a camera, and the one Q1 asks
+        // for. If it disagreed with reality the guidance would send people the
+        // wrong way.
+        for profile in &PROFILES {
+            for cell_px in [6u32, 8, 12] {
+                let (_, image) = painted(profile, cell_px);
+                let detection = Detector::new().detect(&image).expect("detected");
+                let measured = detection.pixels_per_cell();
+                assert!(
+                    (measured - f64::from(cell_px)).abs() < 0.1,
+                    "{} at {cell_px} px/cell measured {measured:.3}",
+                    profile.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pixels_per_cell_falls_when_the_capture_shrinks() {
+        // A camera further away is the same code across fewer pixels, which is
+        // the condition the guidance exists to warn about.
+        let profile = &PROFILES[1];
+        let (layout, image) = painted(profile, 12);
+
+        let mut channel = Channel::pristine();
+        channel.scale = 0.5;
+        let capture = channel.apply(&image, &layout.identity_transform(12));
+
+        let detection = Detector::new().detect(&capture.image).expect("detected");
+        let measured = detection.pixels_per_cell();
+        assert!((measured - 5.5).abs() < 1.0, "expected about 5.5, measured {measured:.3}");
     }
 
     #[test]
