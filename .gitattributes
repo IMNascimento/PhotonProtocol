@@ -1,0 +1,17 @@
+# Normalise to LF in the repository; the working tree keeps platform endings.
+* text=auto eol=lf
+
+*.rs      text eol=lf
+*.toml    text eol=lf
+*.md      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.js      text eol=lf
+*.html    text eol=lf
+*.css     text eol=lf
+
+# Test fixtures and reference frames must never be mangled.
+*.png     binary
+*.jpg     binary
+*.mp4     binary
+*.bin     binary
