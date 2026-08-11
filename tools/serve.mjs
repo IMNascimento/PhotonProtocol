@@ -150,6 +150,16 @@ async function capture(request, response, url) {
 async function handler(request, response) {
   const url = new URL(request.url, 'https://localhost');
 
+  // Log every page load, not only the captures. Without this, silence is
+  // ambiguous between "no device ever reached this server" and "a device
+  // reached it but was not asked to capture anything" — which are opposite
+  // problems, and the second is a typo in an address.
+  if (url.pathname.endsWith('/') || url.pathname.endsWith('.html')) {
+    const who = request.socket.remoteAddress?.replace('::ffff:', '') ?? 'unknown';
+    const capturing = url.searchParams.has('capture') ? 'capture ON' : 'capture off';
+    console.log(`  page     ${url.pathname.padEnd(10)} from ${who.padEnd(16)} ${capturing}`);
+  }
+
   if (request.method === 'POST' && url.pathname === '/capture') {
     await capture(request, response, url);
     return;
