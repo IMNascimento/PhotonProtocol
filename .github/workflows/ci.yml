@@ -19,7 +19,7 @@ jobs:
     name: Format and lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain
         run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
@@ -36,7 +36,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
       - name: Test
         run: cargo test --workspace --all-targets --all-features
@@ -50,7 +50,7 @@ jobs:
       # Takes precedence over rust-toolchain.toml, which tracks stable.
       RUSTUP_TOOLCHAIN: "1.85"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain
         run: rustup toolchain install 1.85 --profile minimal
       - uses: Swatinem/rust-cache@v2
@@ -61,7 +61,7 @@ jobs:
     name: WebAssembly build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install target
         run: rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
@@ -81,10 +81,10 @@ jobs:
     name: Specification cross-check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "22"
       - name: Recompute the frame geometry
         run: node tools/geometry/frame-geometry.js
       - name: Recompute the test vectors
