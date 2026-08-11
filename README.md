@@ -43,23 +43,23 @@ correctness.
 
 ## Status
 
-**Phase 1 of 5.** A file goes in one end and comes out the other, digest
-verified, through a distorted synthetic channel. The wire format is unstable
+**Phase 1 complete.** A file goes in one end and comes out the other, digest
+verified, through a distorted synthetic channel — with the receiver handed
+pictures and finding the code in them for itself. The wire format is unstable
 until [`SPEC.md`](SPEC.md) is tagged `1.0`, and drafts are not interoperable
 with each other.
 
 | Phase | Deliverable | State |
 | --- | --- | --- |
 | 0 | Specification draft, workspace, CI | done |
-| 1 | Encoder, decoder and a synthetic channel simulator | codec done; frame **detection** outstanding |
-| 2 | Bench command line, first decode of real camera footage | |
+| 1 | Encoder, decoder, frame detection, synthetic channel simulator | done |
+| 2 | Bench command line, first decode of real camera footage | next |
 | 3 | Emitter page | |
 | 4 | Decoder page, deployed to GitHub Pages | |
 | 5 | Optimisation, driven by phase 1 and 2 measurements | |
 
-The receiver currently has to be told where the code area sits in the image.
-Finding it — locating the four finder patterns and recovering the homography —
-is the last piece of phase 1.
+Nothing has yet been filmed. Everything measured so far is against a *modelled*
+camera, and phase 2 is where that model meets a real one.
 
 No throughput figure is quoted here on purpose. The target is to beat the
 state of the art, but the number that goes in this README will be one that was
