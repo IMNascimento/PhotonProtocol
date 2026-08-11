@@ -5,7 +5,11 @@ members = ["core", "cli", "wasm"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# Set by `raptorq`, not by this code: it uses `let` chains and AVX-512
+# intrinsics, both of which stabilised well after the 1.85 that edition 2024
+# alone would require. Declaring the edition's floor instead would be a promise
+# the workspace cannot keep.
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/IMNascimento/PhotonProtocol"
 homepage = "https://github.com/IMNascimento/PhotonProtocol"

@@ -48,11 +48,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Takes precedence over rust-toolchain.toml, which tracks stable.
-      RUSTUP_TOOLCHAIN: "1.85"
+      RUSTUP_TOOLCHAIN: "1.89"
     steps:
       - uses: actions/checkout@v5
       - name: Install toolchain
-        run: rustup toolchain install 1.85 --profile minimal
+        run: rustup toolchain install 1.89 --profile minimal
       - uses: Swatinem/rust-cache@v2
       - name: Check
         run: cargo check --workspace --all-targets --all-features
