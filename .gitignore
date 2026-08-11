@@ -30,3 +30,6 @@ Thumbs.db
 # Assembled site and the Node-target wasm package, both derived
 /site/
 /wasm/pkg-node/
+
+# Locally generated development certificate
+/.certs/
