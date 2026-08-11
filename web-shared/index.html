@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhotonProtocol</title>
+<meta name="description" content="Move a file from one phone to another with nothing but a screen and a camera.">
+<link rel="stylesheet" href="shared/style.css">
+</head>
+<body>
+
+<h1>PhotonProtocol</h1>
+<p class="tagline">
+  Move a file from one device to another with nothing but a screen and a camera.
+  No network, no cable, no pairing, no account, no server.
+</p>
+
+<fieldset>
+  <legend>Sending</legend>
+  <p>
+    Open <a href="emit/">the sender</a> on the device that has the file. It
+    paints the file as a sequence of dense visual codes.
+  </p>
+  <p class="note">
+    Turn the brightness up, turn off adaptive brightness and any night or
+    warmth filter, and let it run full screen.
+  </p>
+</fieldset>
+
+<fieldset>
+  <legend>Receiving</legend>
+  <p>
+    Film that screen with the other device, using its ordinary camera app, at
+    the highest resolution it offers. Then open
+    <a href="decode/">the receiver</a> and give it the recording.
+  </p>
+  <p class="note">
+    Fill as much of the frame with the screen as you can, hold reasonably still,
+    and keep recording for a few seconds longer than you think you need. Frames
+    lost to blur or glare cost time, never correctness.
+  </p>
+</fieldset>
+
+<h2>What this is</h2>
+<p>
+  An open protocol for optical file transfer, and a reference implementation of
+  it. Both pages run entirely on your device: nothing is uploaded, because there
+  is nowhere to upload it to. After the first load they work offline.
+</p>
+<p>
+  The channel is one-way. The sender never learns whether anyone is watching, so
+  it does not transmit the file once — it transmits an endless stream of
+  fountain-coded fragments, and any sufficiently large subset rebuilds the whole.
+  Film for as long as it takes.
+</p>
+
+<h2>Before you send anything sensitive</h2>
+<p>
+  The channel is a screen in a room. Anyone who can see it can record it, and
+  anyone who records it can decode it — that is the design, not a defect.
+  PhotonProtocol gives you <strong>integrity, not confidentiality</strong>.
+  Encrypt anything private before handing it over.
+</p>
+
+<h2>Status</h2>
+<p id="versions" class="note">Loading…</p>
+<p class="note">
+  The wire format is a draft and may change. Two copies of these pages from
+  different days are not guaranteed to understand each other.
+  <a href="https://github.com/IMNascimento/PhotonProtocol">Source and specification</a>.
+</p>
+
+<script type="module">
+  import init, { protocolVersion, specVersion } from './photon/photon_wasm.js';
+
+  try {
+    await init();
+    document.getElementById('versions').textContent =
+      `Protocol version ${protocolVersion()}, specification ${specVersion()} (draft).`;
+  } catch (error) {
+    document.getElementById('versions').textContent =
+      `The protocol module failed to load: ${error}`;
+  }
+</script>
+
+</body>
+</html>

@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PhotonProtocol — send</title>
+<link rel="stylesheet" href="../shared/style.css">
+</head>
+<body>
+
+<h1>Send a file</h1>
+<p class="tagline">
+  This device paints the file. Point the other one at the screen and record.
+</p>
+
+<fieldset>
+  <legend>File</legend>
+  <label for="file">Anything up to a few megabytes</label>
+  <input type="file" id="file">
+</fieldset>
+
+<fieldset>
+  <legend>Settings</legend>
+
+  <label for="profile">Profile</label>
+  <select id="profile"></select>
+  <p class="note" id="profile-note"></p>
+
+  <label for="hold">Hold each code for <span id="hold-value">2</span> display refreshes</label>
+  <input type="range" id="hold" min="2" max="6" step="1" value="2">
+  <p class="note">
+    Two is the minimum the format allows and the fastest setting. Raise it if
+    the receiving camera is recording at a lower frame rate than this screen
+    refreshes, or if the recording comes out smeared.
+  </p>
+</fieldset>
+
+<div class="row">
+  <button id="start" disabled>Start</button>
+</div>
+
+<div id="summary" class="hidden">
+  <h2>This transfer</h2>
+  <dl class="facts">
+    <dt>Name</dt><dd id="fact-name">—</dd>
+    <dt>Size</dt><dd id="fact-size">—</dd>
+    <dt>Compression</dt><dd id="fact-compression">—</dd>
+    <dt>Frame</dt><dd id="fact-frame">—</dd>
+    <dt>One full pass</dt><dd id="fact-pass">—</dd>
+  </dl>
+</div>
+
+<div id="status" class="status hidden"></div>
+
+<h2>Getting a good recording</h2>
+<ul class="note">
+  <li>Screen brightness to maximum; turn off auto-brightness and any night or warmth filter.</li>
+  <li>Fill as much of the camera frame with this screen as you can.</li>
+  <li>Record at the highest resolution the camera offers.</li>
+  <li>Avoid glare — a reflection across the codes costs frames.</li>
+  <li>Keep recording past one full pass. Extra frames carry repair data and are never wasted.</li>
+</ul>
+
+<p class="note"><a href="../">Back</a> · <a href="../decode/">Receive a file instead</a></p>
+
+<div id="stage">
+  <canvas id="frame"></canvas>
+  <div class="overlay">
+    <span id="stage-status">Starting…</span>
+    <button id="stop" class="secondary">Stop</button>
+  </div>
+</div>
+
+<script type="module" src="./emitter.js"></script>
+
+</body>
+</html>

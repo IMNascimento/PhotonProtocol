@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhotonProtocol — receive</title>
+<link rel="stylesheet" href="../shared/style.css">
+</head>
+<body>
+
+<h1>Receive a file</h1>
+<p class="tagline">
+  Give this page the video you recorded of the other screen.
+</p>
+
+<fieldset>
+  <legend>Recording</legend>
+  <label for="video">The video from your camera roll</label>
+  <input type="file" id="video" accept="video/*">
+  <p class="note">
+    Nothing is uploaded. The video is read on this device and never leaves it.
+  </p>
+</fieldset>
+
+<fieldset>
+  <legend>Settings</legend>
+  <label for="profile">Profile the sender used</label>
+  <select id="profile"></select>
+  <p class="note">
+    If you did not change it on the sending device, leave this alone.
+  </p>
+</fieldset>
+
+<div class="row">
+  <button id="start" disabled>Read the recording</button>
+  <button id="stop" class="secondary hidden">Stop</button>
+</div>
+
+<div id="live" class="hidden">
+  <h2>Progress</h2>
+  <progress id="bar" value="0" max="1"></progress>
+  <dl class="facts">
+    <dt>Blocks</dt><dd id="fact-blocks">—</dd>
+    <dt>Frames read</dt><dd id="fact-frames">—</dd>
+    <dt>Frames used</dt><dd id="fact-used">—</dd>
+    <dt>Code not found</dt><dd id="fact-missed">—</dd>
+    <dt>Doubtful cells</dt><dd id="fact-doubtful">—</dd>
+    <dt>File</dt><dd id="fact-name">—</dd>
+  </dl>
+</div>
+
+<div id="status" class="status hidden"></div>
+
+<div id="result" class="row hidden">
+  <a id="download" class="hidden"></a>
+</div>
+
+<h2>If it does not work</h2>
+<p class="note">
+  This page reports which stage gave up, not just that it failed. The two
+  common outcomes have different fixes:
+</p>
+<ul class="note">
+  <li>
+    <strong>The code was not found</strong> in most frames — the screen is too
+    small in the shot, too blurred, or too reflective. Get closer, hold
+    steadier, and move the glare off it.
+  </li>
+  <li>
+    <strong>Not enough blocks</strong> — the recording was simply too short.
+    Film the same transfer again for longer; the sender never repeats itself, so
+    every extra second is new data.
+  </li>
+</ul>
+
+<p class="note"><a href="../">Back</a> · <a href="../emit/">Send a file instead</a></p>
+
+<video id="player" playsinline muted class="hidden"></video>
+<canvas id="grabber" class="hidden"></canvas>
+
+<script type="module" src="./decoder.js"></script>
+
+</body>
+</html>
