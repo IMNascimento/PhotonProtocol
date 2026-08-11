@@ -35,12 +35,14 @@
 //! rewritten against a format that moved underneath it.
 
 pub mod error;
+pub mod frame;
 pub mod geom;
 pub mod image;
 pub mod profile;
 pub mod symbol;
 
 pub use error::{Error, Result};
+pub use frame::{FrameLayout, Region};
 pub use geom::{Homography, Point};
 pub use image::RgbImage;
 pub use profile::{Profile, ProfileId, RsPartition};
