@@ -12,6 +12,7 @@ use crate::Homography;
 use crate::codec::{
     FrameFlags, FrameHeader, PayloadUnit, UNIT_OVERHEAD, encode_units, parse_units, unit_type,
 };
+use crate::detect::Detector;
 use crate::error::{Error, Result};
 use crate::fec::PayloadCodec;
 use crate::file::{Compression, Manifest, compress, decompress, digest};
@@ -231,6 +232,8 @@ impl Transmitter {
 /// What happened to one frame the receiver was shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameOutcome {
+    /// No code area could be located in the image at all.
+    NotLocated,
     /// The frame was read and its units were taken.
     Decoded,
     /// The frame belongs to this session but has already been seen.
@@ -293,6 +296,7 @@ pub struct ReceivedFile {
 pub struct Receiver {
     layout: FrameLayout,
     payload_codec: PayloadCodec,
+    detector: Detector,
     session_id: Option<u32>,
     manifest: Option<Manifest>,
     transport: Option<TransportDecoder>,
@@ -308,6 +312,7 @@ impl Receiver {
         Self {
             layout: FrameLayout::new(profile.profile()),
             payload_codec: PayloadCodec::for_profile(profile.profile()),
+            detector: Detector::for_profile(profile),
             session_id: None,
             manifest: None,
             transport: None,
@@ -342,10 +347,34 @@ impl Receiver {
         self.transport.as_ref().is_some_and(TransportDecoder::is_complete)
     }
 
-    /// Offers one located frame.
+    /// Offers one video frame, locating the code area first.
     ///
-    /// `transform` maps cell space onto the image, as produced by the detector
-    /// or, in tests, by [`FrameLayout::identity_transform`].
+    /// This is the entry point a decoder actually uses: it is handed pictures,
+    /// not frames. Images with no code in them are the common case — a recording
+    /// starts before the phone is pointed at anything — so failing to locate one
+    /// is an ordinary outcome rather than an error.
+    pub fn accept_image(&mut self, image: &RgbImage) -> FrameReport {
+        if let Ok(detection) = self.detector.detect(image) {
+            return self.accept_frame(image, &detection.transform);
+        }
+
+        self.frames_seen += 1;
+        FrameReport {
+            outcome: FrameOutcome::NotLocated,
+            header: None,
+            units_accepted: 0,
+            units_rejected: 0,
+            new_symbols: 0,
+            doubtful_cells: 0,
+            total_cells: self.layout.data_cells().len(),
+        }
+    }
+
+    /// Offers one already-located frame.
+    ///
+    /// `transform` maps cell space onto the image. Callers that have a picture
+    /// rather than a located frame want [`Receiver::accept_image`]; this exists
+    /// for tests and for callers doing their own detection.
     pub fn accept_frame(&mut self, image: &RgbImage, transform: &Homography) -> FrameReport {
         self.frames_seen += 1;
 
