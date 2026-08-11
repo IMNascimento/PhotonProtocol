@@ -892,6 +892,16 @@ deciding which cells are unreliable. A per-frame quality region, or a
 deliberately known-value cell scattered through the data region, would let a
 decoder calibrate its confidence threshold. Both cost cells.
 
+*Phase 1 measured this and the result is negative.* Across the severity band
+that decides whether a transfer succeeds, a nearest-versus-second-nearest
+confidence margin flags only 8% to 25% of the cells that are actually wrong; it
+becomes informative only at severities where the frame is already unrecoverable.
+As it stands the erasure path is complexity that buys close to nothing. See
+`docs/phase-1-report.md` finding F1. Either the confidence estimate needs a
+better basis, or the format must carry known-value cells for a decoder to
+calibrate against — which is a wire-format change and therefore has to be
+settled before 1.0.
+
 **Q6 — Frame rate versus rolling shutter.** §4.7 caps emission at half the
 refresh rate, which is a safe assumption, not a measured one. Rolling shutter
 means a video frame can contain the top of one code and the bottom of the next.

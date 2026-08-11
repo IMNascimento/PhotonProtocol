@@ -12,7 +12,18 @@
 
 use std::process::ExitCode;
 
+use photon_core::simulate::{Channel, measure};
 use photon_core::{PROTOCOL_VERSION, SPEC_VERSION, profile::PROFILES};
+
+/// Confidence threshold the receiver uses to flag a cell as an erasure.
+const ERASURE_CONFIDENCE: f32 = 0.08;
+
+/// Pixels per cell used for the simulation sweep.
+///
+/// A 4K recording of a phone screen that fills most of the frame gives roughly
+/// this many camera pixels per cell at `P2-standard`, which is what `SPEC.md`
+/// Q1 asks to be measured rather than assumed.
+const SWEEP_CELL_PX: u32 = 12;
 
 const USAGE: &str = "\
 photon — PhotonProtocol bench command line
@@ -22,6 +33,7 @@ USAGE:
 
 COMMANDS:
     profiles    List the physical-layer profiles and their derived geometry
+    simulate    Sweep the synthetic channel and report cell error rates
     version     Print the implementation and protocol versions
     help        Print this message
 ";
@@ -31,6 +43,10 @@ fn main() -> ExitCode {
     match args.next().as_deref() {
         Some("profiles") => {
             print_profiles();
+            ExitCode::SUCCESS
+        }
+        Some("simulate") => {
+            print_simulation();
             ExitCode::SUCCESS
         }
         Some("version") => {
@@ -51,6 +67,66 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Sweeps the synthetic channel and reports what it costs the classifier.
+///
+/// This is the phase 1 measurement. The columns that matter are the cell error
+/// rate against the profile's correction budget — which is what decides whether
+/// a frame is recoverable at all — and how much of that error the confidence
+/// margin managed to flag, since erasure decoding is only worth its complexity
+/// if the margin tracks error.
+fn print_simulation() {
+    println!("Synthetic channel sweep at {SWEEP_CELL_PX} pixels per cell.");
+    println!("Budget is the profile's error-correction radius; above it a frame is lost.\n");
+
+    for profile in &PROFILES {
+        let budget = profile.rs_parity_rate() / 2.0;
+        println!(
+            "{} — {}x{} cells, {} bits/cell, correction budget {:.2}%",
+            profile.name,
+            profile.grid,
+            profile.grid,
+            profile.bits_per_cell(),
+            budget * 100.0
+        );
+        println!(
+            "  {:>8} {:>12} {:>12} {:>12} {:>10}",
+            "SEVERITY", "CELL ERRORS", "DOUBTFUL", "CAUGHT", "VERDICT"
+        );
+
+        let mut breaking = None;
+        for step in 0..=10 {
+            let severity = f64::from(step) / 10.0;
+            let channel = Channel::severity(severity);
+            let report = measure(profile, &channel, SWEEP_CELL_PX, ERASURE_CONFIDENCE);
+
+            let rate = report.cell_error_rate();
+            let over = rate > budget;
+            if over && breaking.is_none() {
+                breaking = Some(severity);
+            }
+
+            println!(
+                "  {:>8.1} {:>11.3}% {:>11.3}% {:>11.1}% {:>10}",
+                severity,
+                rate * 100.0,
+                report.doubtful_rate() * 100.0,
+                report.error_detection_rate() * 100.0,
+                if over { "over" } else { "ok" }
+            );
+        }
+
+        match breaking {
+            Some(severity) => println!("  first uncorrectable severity: {severity:.1}"),
+            None => println!("  correctable across the whole ladder"),
+        }
+        println!();
+    }
+
+    println!("Caveat: the severity ladder is a model, not a measurement of any real");
+    println!("camera. Phase 2 replaces it with parameters fitted to actual footage,");
+    println!("and the numbers above should be re-read then (SPEC.md Q1, Q3).");
 }
 
 fn print_version() {
