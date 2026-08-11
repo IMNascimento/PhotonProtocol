@@ -54,7 +54,7 @@ const name = Buffer.from('report.pdf', 'utf8');
 const m = Buffer.alloc(61 + name.length);
 Buffer.from('PHTM', 'ascii').copy(m, 0);
 m[4] = 0x01;                       // manifest_version
-m[5] = 0x01;                       // compression = zstd
+m[5] = 0x01;                       // compression = Brotli
 m.writeUInt16LE(0x0000, 6);        // flags
 m.writeBigUInt64LE(1048576n, 8);   // original_size
 Buffer.from('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', 'hex').copy(m, 16); // sha256("abc")

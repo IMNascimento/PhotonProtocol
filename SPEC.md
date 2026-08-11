@@ -627,15 +627,34 @@ repeated here.
 
 ### 7.2 Compression
 
-| value | algorithm |
-| --- | --- |
-| `0x00` | none |
-| `0x01` | zstd (RFC 8878) |
+| value | algorithm | support |
+| --- | --- | --- |
+| `0x00` | none | REQUIRED |
+| `0x01` | Brotli (RFC 7932) | REQUIRED |
+| `0x02` | Zstandard (RFC 8878) | OPTIONAL |
 
-An emitter SHOULD compress with zstd, and MUST fall back to `0x00` when the
+An emitter SHOULD compress with Brotli, and MUST fall back to `0x00` when the
 compressed form is not at least 2% smaller than the original — which is the
 normal outcome for input that is already compressed, such as JPEG, MP4, ZIP or
 an encrypted blob.
+
+Brotli rather than Zstandard is a decision about where this protocol runs. Both
+pages execute as WebAssembly on a phone, and the reference Zstandard library is
+C: building it for `wasm32-unknown-unknown` needs a C toolchain targeting Wasm,
+which every contributor and every CI job would then have to carry. Brotli has a
+mature implementation in pure Rust, so the same code compiles for every target
+without one.
+
+It also compresses better here. On a mixed source-and-documentation corpus of
+123088 bytes, Brotli at quality 11 produced 36363 bytes against 39618 for
+Zstandard at level 19 — 8.2% smaller. Compression took 126 ms against 51 ms, and
+decompression was comparable at well under a millisecond. Encoder time is not a
+constraint in this protocol: a frame carries a few kilobytes and the display
+emits perhaps thirty frames a second, so the compressor finishes long before the
+channel does.
+
+Zstandard keeps a registered identifier so that an implementation which can
+already link it may use it, but a decoder is not required to understand it.
 
 A decoder MUST reject a manifest declaring an algorithm it does not implement,
 and MUST bound the decompressed size by `original_size` so that a corrupt or
@@ -783,7 +802,7 @@ Bytes `[0, 18)`:
 
 ### 10.3 Manifest
 
-Fields: `manifest_version` = 1, `compression` = `0x01` (zstd), `flags` = 0,
+Fields: `manifest_version` = 1, `compression` = `0x01` (Brotli), `flags` = 0,
 `original_size` = 1048576, `sha256` = SHA-256 of the ASCII string `abc`, OTI with
 `F` = 524288, `T` = 1152, `Z` = 1, `N` = 1, `Al` = 8, `name` = `report.pdf`.
 
@@ -891,6 +910,7 @@ requirement.
 
 - RFC 2119 — Key words for use in RFCs to Indicate Requirement Levels
 - RFC 6330 — RaptorQ Forward Error Correction Scheme for Object Delivery
+- RFC 7932 — Brotli Compressed Data Format
 - RFC 8878 — Zstandard Compression and the `application/zstd` Media Type
 - FIPS 180-4 — Secure Hash Standard (SHA-256)
 - ISO/IEC 18004 — QR Code bar code symbology (finder and alignment pattern
