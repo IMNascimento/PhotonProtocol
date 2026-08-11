@@ -28,7 +28,19 @@ pedantic = { level = "warn", priority = -1 }
 cast_possible_truncation = "deny"
 cast_possible_wrap = "deny"
 cast_sign_loss = "deny"
-indexing_slicing = "warn"
+
+# Counts and small indices are converted to f32 to average them. The values
+# involved are cell and sub-cell tallies, orders of magnitude below the 24 bits
+# an f32 holds exactly, so the lint fires only on conversions that cannot lose
+# anything -- and drowns the ones above, which can.
+cast_precision_loss = "allow"
+
+# Deliberately not enabled. The classifier and the frame geometry are built on
+# fixed-size arrays indexed by loop counters the compiler can see are in range,
+# where rewriting every access as `.get(i).unwrap()` costs clarity and buys no
+# safety. Slice and vector accesses that genuinely could be out of range are
+# written with `get` by hand.
+# indexing_slicing = "warn"
 
 [profile.release]
 opt-level = 3

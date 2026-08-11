@@ -36,9 +36,11 @@
 
 pub mod error;
 pub mod profile;
+pub mod symbol;
 
 pub use error::{Error, Result};
 pub use profile::{Profile, ProfileId, RsPartition};
+pub use symbol::{Alphabet, CellSample, Classification, Classifier, Rgb, Rgbf};
 
 /// Value of the `protocol_version` header field this crate implements.
 ///
