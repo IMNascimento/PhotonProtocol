@@ -369,9 +369,13 @@ impl FrameLayout {
     }
 
     /// Centre of the alignment module, in cell space.
+    ///
+    /// The module spans the seven cells `[G/2-3, G/2+4)`, so its middle cell is
+    /// `G/2` and the middle of *that cell* — which is what a sampler wants — is
+    /// half a cell further on.
     #[must_use]
     pub fn alignment_centre(&self) -> Point {
-        let centre = f64::from(self.grid()) / 2.0;
+        let centre = f64::from(self.grid() / 2) + 0.5;
         Point::new(centre, centre)
     }
 
@@ -415,8 +419,7 @@ fn classify_cell(profile: &Profile, header_rows: u32, row: u32, col: u32) -> Reg
         return Region::Header;
     }
 
-    let align_start = grid / 2 - ALIGNMENT_MODULE / 2 - 1;
-    let align = align_start..align_start + ALIGNMENT_MODULE;
+    let align = alignment_start(grid)..alignment_start(grid) + ALIGNMENT_MODULE;
     if align.contains(&row) && align.contains(&col) {
         return Region::Alignment;
     }
@@ -471,8 +474,18 @@ fn timing_colour(grid: u32, row: u32, col: u32) -> Rgb {
     if varying % 2 == 0 { Rgb::BLACK } else { Rgb::WHITE }
 }
 
+/// First row and column of the alignment module (`SPEC.md` §4.2.5).
+///
+/// Written once and shared by the region map, the renderer and the detector.
+/// Three places computing "the middle, minus half a module" independently is
+/// three chances to be one cell out — and a decoder that samples one cell away
+/// from where the encoder painted sees plausible values in the wrong place.
+const fn alignment_start(grid: u32) -> u32 {
+    grid / 2 - 3
+}
+
 fn alignment_colour(grid: u32, row: u32, col: u32) -> Rgb {
-    let start = grid / 2 - ALIGNMENT_MODULE / 2 - 1;
+    let start = alignment_start(grid);
     let local_row = row - start;
     let local_col = col - start;
 
@@ -754,6 +767,33 @@ mod tests {
                 }
             }
             assert!(wrong.is_empty(), "{} misread: {:?}", profile.name, wrong.first());
+        }
+    }
+
+    #[test]
+    fn the_alignment_module_sits_where_the_specification_says() {
+        // SPEC.md 4.2.5 places the module at [G/2-3, G/2+4). The renderer and
+        // the region map used to derive that independently and agreed with each
+        // other while both being one cell out, which no round-trip test can
+        // catch: the encoder and decoder share the mistake. A third-party
+        // implementation following the specification would not.
+        for profile in &PROFILES {
+            let layout = FrameLayout::new(profile);
+            let grid = layout.grid();
+            let first = grid / 2 - 3;
+            let last = grid / 2 + 3;
+
+            assert_eq!(layout.region(first, first), Region::Alignment, "{}", profile.name);
+            assert_eq!(layout.region(last, last), Region::Alignment, "{}", profile.name);
+            assert_ne!(layout.region(first - 1, first - 1), Region::Alignment, "{}", profile.name);
+            assert_ne!(layout.region(last + 1, last + 1), Region::Alignment, "{}", profile.name);
+
+            // And the sampling centre must land on the middle cell of the
+            // pattern, which carries the single dark dot a detector looks for.
+            let centre = layout.alignment_centre();
+            let middle = f64::from(grid / 2);
+            assert!((centre.x - middle - 0.5).abs() < 1e-9, "{}", profile.name);
+            assert!((centre.y - middle - 0.5).abs() < 1e-9, "{}", profile.name);
         }
     }
 
