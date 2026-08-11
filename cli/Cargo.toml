@@ -1,0 +1,21 @@
+[package]
+name = "photon-cli"
+description = "Bench command line for PhotonProtocol: encode files to frames, decode video back to files"
+readme = "../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "photon"
+path = "src/main.rs"
+
+[dependencies]
+photon-core.workspace = true
+
+[lints]
+workspace = true
