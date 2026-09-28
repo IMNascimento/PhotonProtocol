@@ -19,6 +19,7 @@ use crate::file::{Compression, Manifest, compress, decompress, digest};
 use crate::frame::{FrameLayout, bytes_to_cells, cell_byte_span, cells_to_bytes};
 use crate::image::RgbImage;
 use crate::profile::{PROFILES, ProfileId};
+use crate::register::Mesh;
 use crate::symbol::Classifier;
 use crate::transport::{PAYLOAD_ID_LEN, TransportDecoder, TransportEncoder, choose_symbol_size};
 
@@ -46,6 +47,12 @@ const MANIFEST_PERIOD: u32 = 1;
 /// actually there.
 const ERASURE_CONFIDENCE: f32 = 0.08;
 
+/// Cells between the ones the classifier is refitted to.
+///
+/// Co-prime with every grid width, so the cells chosen wander across the frame
+/// instead of falling in columns.
+const REFIT_STRIDE: usize = 3;
+
 /// A painted frame and the header that describes it.
 #[derive(Debug, Clone)]
 pub struct Frame {
@@ -53,6 +60,17 @@ pub struct Frame {
     pub header: FrameHeader,
     /// The painted pixels.
     pub image: RgbImage,
+}
+
+/// What one frame carries, before it is drawn.
+#[derive(Debug, Clone)]
+pub struct FrameContents {
+    /// What the frame declares about itself.
+    pub header: FrameHeader,
+    /// The header, error-corrected, as written into both bands.
+    pub header_codeword: Vec<u8>,
+    /// One value per payload cell, in the layout's data order.
+    pub cells: Vec<u16>,
 }
 
 /// Paints the endless sequence of frames for one file.
@@ -173,6 +191,23 @@ impl Transmitter {
     /// Returns [`Error::Malformed`] only for internal contract violations, which
     /// would mean a profile table and a codec that disagree.
     pub fn next_frame(&mut self, cell_px: u32) -> Result<Frame> {
+        let contents = self.next_contents()?;
+        Ok(Frame {
+            header: contents.header,
+            image: self.layout.render(&contents.header_codeword, &contents.cells, cell_px),
+        })
+    }
+
+    /// The next frame as cell values rather than as pixels.
+    ///
+    /// What a frame *says*, separated from how it is drawn. A bench that knows
+    /// what every cell was meant to be can count the ones a decoder read
+    /// wrongly, which is the measurement everything else is a proxy for.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Malformed`] only for internal contract violations.
+    pub fn next_contents(&mut self) -> Result<FrameContents> {
         let capacity = self.payload_codec.capacity();
         let mut units = Vec::new();
         let mut used = 0usize;
@@ -218,10 +253,10 @@ impl Transmitter {
         let cells = bytes_to_cells(&raw, bits, self.layout.data_cells().len());
 
         let codeword_len = self.layout.profile().header_codeword_len() as usize;
-        let codeword = header.encode_codeword(codeword_len)?;
+        let header_codeword = header.encode_codeword(codeword_len)?;
 
         self.frame_seq = self.frame_seq.wrapping_add(1);
-        Ok(Frame { header, image: self.layout.render(&codeword, &cells, cell_px) })
+        Ok(FrameContents { header, header_codeword, cells })
     }
 
     fn next_symbol(&mut self) -> Vec<u8> {
@@ -289,6 +324,15 @@ pub struct FrameReport {
     /// user can actually act on: it rises by stepping closer. See
     /// [`crate::detect::Detection::pixels_per_cell`].
     pub pixels_per_cell: Option<f64>,
+    /// The four finder centres in the picture, when the frame was located:
+    /// top-left, top-right, bottom-right, bottom-left.
+    ///
+    /// Where the code is. A caller reading a video can look there first in the
+    /// next picture, and can show the person holding the camera what it has
+    /// found.
+    pub corners: Option<[crate::Point; 4]>,
+    /// How far the sampling grid had to be bent to fit, in cells.
+    pub correction: Option<f64>,
 }
 
 impl FrameReport {
@@ -327,6 +371,15 @@ pub struct FrameReading {
     pub total_cells: usize,
     /// Camera pixels per cell, when the frame was located.
     pub pixels_per_cell: Option<f64>,
+    /// The value each payload cell was read as, when the read got that far.
+    ///
+    /// Before error correction, so it is what the classifier decided and not
+    /// what the parity made of it.
+    pub cells: Vec<u16>,
+    /// The four finder centres in the picture, when the frame was located.
+    pub corners: Option<[crate::Point; 4]>,
+    /// How far the sampling grid had to be bent to fit, in cells.
+    pub correction: Option<f64>,
 }
 
 impl FrameReading {
@@ -341,8 +394,230 @@ impl FrameReading {
             doubtful_cells: 0,
             total_cells: 0,
             pixels_per_cell: None,
+            cells: Vec::new(),
+            corners: None,
+            correction: None,
         }
     }
+}
+
+/// A picture read as far as its frame's header.
+///
+/// Reading a picture has a cheap half and an expensive one, and the header
+/// falls between them: it says which code this is before any of the payload
+/// has been touched. A camera sees most codes more than once, so a caller that
+/// looks at the header first can drop the repeats for a fraction of what
+/// reading them would cost.
+#[derive(Debug, Clone)]
+pub struct FrameOpening {
+    /// [`FrameOutcome::Decoded`] when the header was read and the payload is
+    /// worth reading; otherwise why it is not.
+    pub outcome: FrameOutcome,
+    /// The header, when it was readable.
+    pub header: Option<FrameHeader>,
+    /// The profile whose geometry the frame was read with.
+    pub profile: ProfileId,
+    /// Camera pixels per cell.
+    pub pixels_per_cell: Option<f64>,
+    /// The four finder centres in the picture.
+    pub corners: Option<[crate::Point; 4]>,
+    /// How far the sampling grid had to be bent to fit, in cells.
+    pub correction: f64,
+    mesh: Mesh,
+}
+
+impl FrameOpening {
+    /// The reading this opening amounts to if nothing more is read.
+    fn reading(&self, total_cells: usize) -> FrameReading {
+        FrameReading {
+            // Not yet decoded, whatever the opening says: that is for whoever
+            // reads the payload to claim.
+            outcome: if self.outcome == FrameOutcome::Decoded {
+                FrameOutcome::PayloadUnrecoverable
+            } else {
+                self.outcome
+            },
+            header: self.header,
+            units: Vec::new(),
+            units_rejected: 0,
+            doubtful_cells: 0,
+            total_cells,
+            pixels_per_cell: self.pixels_per_cell,
+            cells: Vec::new(),
+            corners: self.corners,
+            correction: Some(self.correction),
+        }
+    }
+
+    /// The reading for a frame that was opened and then not wanted.
+    #[must_use]
+    pub fn declined(&self) -> FrameReading {
+        let mut reading = self.reading(0);
+        reading.outcome = FrameOutcome::Duplicate;
+        reading
+    }
+}
+
+/// First byte of a serialised reading, so that something else handed to
+/// [`FrameReading::from_bytes`] is refused rather than misread.
+const READING_MAGIC: u8 = 0xF7;
+
+impl FrameReading {
+    /// Packs the reading into bytes, to be carried between threads.
+    ///
+    /// Not part of the protocol and not stable: it exists so that a browser can
+    /// read pictures on several cores and fold the results together on one,
+    /// and both ends of it are always the same build.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(READING_MAGIC);
+        out.push(outcome_code(self.outcome));
+
+        match self.header {
+            Some(header) => {
+                out.push(1);
+                out.extend_from_slice(&header.encode());
+            }
+            None => out.push(0),
+        }
+
+        let count = |value: usize| u32::try_from(value).unwrap_or(u32::MAX).to_le_bytes();
+        out.extend_from_slice(&count(self.units_rejected));
+        out.extend_from_slice(&count(self.doubtful_cells));
+        out.extend_from_slice(&count(self.total_cells));
+        out.extend_from_slice(&self.pixels_per_cell.unwrap_or(f64::NAN).to_le_bytes());
+        out.extend_from_slice(&self.correction.unwrap_or(f64::NAN).to_le_bytes());
+
+        match self.corners {
+            Some(corners) => {
+                out.push(1);
+                for corner in corners {
+                    out.extend_from_slice(&corner.x.to_le_bytes());
+                    out.extend_from_slice(&corner.y.to_le_bytes());
+                }
+            }
+            None => out.push(0),
+        }
+
+        out.extend_from_slice(&count(self.units.len()));
+        for unit in &self.units {
+            out.push(unit.kind);
+            out.extend_from_slice(&count(unit.data.len()));
+            out.extend_from_slice(&unit.data);
+        }
+        out
+    }
+
+    /// Unpacks a reading packed by [`FrameReading::to_bytes`].
+    ///
+    /// Returns `None` for anything that is not one.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut cursor = Cursor { bytes, at: 0 };
+
+        if cursor.byte()? != READING_MAGIC {
+            return None;
+        }
+        let outcome = outcome_from(cursor.byte()?)?;
+
+        let header = if cursor.byte()? == 0 {
+            None
+        } else {
+            Some(FrameHeader::decode(cursor.take(crate::codec::HEADER_LEN)?).ok()?)
+        };
+
+        let units_rejected = cursor.count()?;
+        let doubtful_cells = cursor.count()?;
+        let total_cells = cursor.count()?;
+        let pixels_per_cell = Some(cursor.float()?).filter(|v| v.is_finite());
+        let correction = Some(cursor.float()?).filter(|v| v.is_finite());
+
+        let corners = if cursor.byte()? == 0 {
+            None
+        } else {
+            let mut corners = [crate::Point::new(0.0, 0.0); 4];
+            for corner in &mut corners {
+                *corner = crate::Point::new(cursor.float()?, cursor.float()?);
+            }
+            Some(corners)
+        };
+
+        let unit_count = cursor.count()?;
+        let mut units = Vec::new();
+        for _ in 0..unit_count {
+            let kind = cursor.byte()?;
+            let length = cursor.count()?;
+            units.push(PayloadUnit::new(kind, cursor.take(length)?.to_vec()));
+        }
+
+        Some(Self {
+            outcome,
+            header,
+            units,
+            units_rejected,
+            doubtful_cells,
+            total_cells,
+            pixels_per_cell,
+            cells: Vec::new(),
+            corners,
+            correction,
+        })
+    }
+}
+
+/// Reads fields out of a byte slice, refusing to run past its end.
+struct Cursor<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn take(&mut self, length: usize) -> Option<&'a [u8]> {
+        let end = self.at.checked_add(length)?;
+        let slice = self.bytes.get(self.at..end)?;
+        self.at = end;
+        Some(slice)
+    }
+
+    fn byte(&mut self) -> Option<u8> {
+        self.take(1).map(|b| b[0])
+    }
+
+    fn count(&mut self) -> Option<usize> {
+        let raw: [u8; 4] = self.take(4)?.try_into().ok()?;
+        usize::try_from(u32::from_le_bytes(raw)).ok()
+    }
+
+    fn float(&mut self) -> Option<f64> {
+        let raw: [u8; 8] = self.take(8)?.try_into().ok()?;
+        Some(f64::from_le_bytes(raw))
+    }
+}
+
+const fn outcome_code(outcome: FrameOutcome) -> u8 {
+    match outcome {
+        FrameOutcome::NotLocated => 0,
+        FrameOutcome::Straddled => 1,
+        FrameOutcome::Decoded => 2,
+        FrameOutcome::Duplicate => 3,
+        FrameOutcome::WrongSession => 4,
+        FrameOutcome::HeaderUnreadable => 5,
+        FrameOutcome::PayloadUnrecoverable => 6,
+    }
+}
+
+const fn outcome_from(code: u8) -> Option<FrameOutcome> {
+    Some(match code {
+        0 => FrameOutcome::NotLocated,
+        1 => FrameOutcome::Straddled,
+        2 => FrameOutcome::Decoded,
+        3 => FrameOutcome::Duplicate,
+        4 => FrameOutcome::WrongSession,
+        5 => FrameOutcome::HeaderUnreadable,
+        6 => FrameOutcome::PayloadUnrecoverable,
+        _ => return None,
+    })
 }
 
 /// A file rebuilt from a recording.
@@ -500,7 +775,17 @@ impl Receiver {
     /// starts before the phone is pointed at anything — so failing to locate one
     /// is an ordinary outcome rather than an error.
     pub fn accept_image(&mut self, image: &RgbImage) -> FrameReport {
-        self.absorb(self.examine(image))
+        // A camera sees most codes more than once, and reading the payload is
+        // most of the cost of a picture. The header says which code this is
+        // before any of that is spent, so a code already taken is dropped
+        // there.
+        let session = self.session_id;
+        let seen = &self.seen_frames;
+        let reading = self.examine_unless(image, &|header: &FrameHeader| {
+            session.is_some_and(|known| known != header.session_id)
+                || (session == Some(header.session_id) && seen.contains(&header.frame_seq))
+        });
+        self.absorb(reading)
     }
 
     /// Offers one already-located frame.
@@ -512,9 +797,9 @@ impl Receiver {
         // Without a detection there is nothing to say which profile drew the
         // frame, so every candidate is tried and the first readable header wins.
         for candidate in &self.candidates {
-            let reading = read_frame(candidate, image, transform);
-            if reading.header.is_some() {
-                return self.absorb(reading);
+            let opening = open_frame(candidate, image, transform);
+            if opening.header.is_some() {
+                return self.absorb(self.read(image, &opening));
             }
         }
         self.absorb(FrameReading::not_located())
@@ -529,16 +814,49 @@ impl Receiver {
     /// thread. The order-dependent part, which is small, is [`Receiver::absorb`].
     #[must_use]
     pub fn examine(&self, image: &RgbImage) -> FrameReading {
-        match self.detector.detect(image) {
-            Ok(detection) => match self.candidate(detection.profile) {
-                Some(candidate) => {
-                    let mut reading = read_frame(candidate, image, &detection.transform);
-                    reading.pixels_per_cell = Some(detection.pixels_per_cell());
-                    reading
-                }
-                None => FrameReading::not_located(),
-            },
-            Err(_) => FrameReading::not_located(),
+        self.examine_unless(image, &|_| false)
+    }
+
+    /// Reads a picture, stopping at the header if `unwanted` says the frame is
+    /// not worth the rest.
+    fn examine_unless(
+        &self,
+        image: &RgbImage,
+        unwanted: &dyn Fn(&FrameHeader) -> bool,
+    ) -> FrameReading {
+        let Some(opening) = self.open(image) else {
+            return FrameReading::not_located();
+        };
+        if opening.header.as_ref().is_some_and(unwanted) {
+            return opening.declined();
+        }
+        self.read(image, &opening)
+    }
+
+    /// Finds the frame in a picture and reads its header, and no more.
+    ///
+    /// Returns `None` when there is no frame to be found. Otherwise the opening
+    /// says which code the picture holds, and [`Receiver::read`] reads the rest
+    /// of it if the caller decides it is wanted.
+    #[must_use]
+    pub fn open(&self, image: &RgbImage) -> Option<FrameOpening> {
+        let detection = self.detector.detect(image).ok()?;
+        let candidate = self.candidate(detection.profile)?;
+
+        let mut opening = open_frame(candidate, image, &detection.transform);
+        opening.pixels_per_cell = Some(detection.pixels_per_cell());
+        opening.corners = Some(detection.corners);
+        Some(opening)
+    }
+
+    /// Reads the payload of a picture already opened.
+    ///
+    /// `image` must be the picture the opening was made from.
+    #[must_use]
+    pub fn read(&self, image: &RgbImage, opening: &FrameOpening) -> FrameReading {
+        match self.candidate(opening.profile) {
+            Some(candidate) => read_payload(candidate, image, opening),
+            None => FrameReading::not_located(),
         }
     }
 
@@ -559,6 +877,8 @@ impl Receiver {
             doubtful_cells: reading.doubtful_cells,
             total_cells: reading.total_cells,
             pixels_per_cell: reading.pixels_per_cell,
+            corners: reading.corners,
+            correction: reading.correction,
         };
 
         if reading.pixels_per_cell.is_some() {
@@ -571,6 +891,12 @@ impl Receiver {
         let Some(header) = reading.header else {
             return report;
         };
+        if reading.outcome == FrameOutcome::Duplicate
+            && self.session_id.is_some_and(|known| known != header.session_id)
+        {
+            report.outcome = FrameOutcome::WrongSession;
+            return report;
+        }
         if reading.outcome != FrameOutcome::Decoded {
             return report;
         }
@@ -709,20 +1035,16 @@ impl Receiver {
 /// a different code at each end. When they disagree the payload between them is
 /// a splice of two codes and is not worth decoding — and, far more usefully,
 /// the disagreement says exactly what is wrong and where to fix it.
-fn read_headers(
-    layout: &FrameLayout,
-    image: &RgbImage,
-    transform: &Homography,
-) -> [Option<FrameHeader>; 2] {
+fn read_headers(layout: &FrameLayout, image: &RgbImage, mesh: &Mesh) -> [Option<FrameHeader>; 2] {
     let codeword_len = layout.profile().header_codeword_len() as usize;
-    let (dark, light) = timing_levels(layout, image, transform);
+    let (dark, light) = timing_levels(layout, image, mesh);
     let threshold = f32::midpoint(dark, light);
 
     core::array::from_fn(|band| {
         let cells = layout.header_band(band);
         let mut bytes = vec![0u8; codeword_len];
         for (index, &cell) in cells.iter().take(codeword_len * 8).enumerate() {
-            let luma = layout.sample_cell_mean(image, transform, cell).luma();
+            let luma = layout.sample_cell_core(image, mesh, cell).luma();
             if luma > threshold {
                 bytes[index / 8] |= 1 << (7 - index % 8);
             }
@@ -737,13 +1059,13 @@ fn read_headers(
 /// "dark" and "light" mean through this camera at this exposure — which is the
 /// only way to threshold the header without assuming an exposure the emitter
 /// never chose.
-fn timing_levels(layout: &FrameLayout, image: &RgbImage, transform: &Homography) -> (f32, f32) {
+fn timing_levels(layout: &FrameLayout, image: &RgbImage, mesh: &Mesh) -> (f32, f32) {
     let grid = layout.grid();
     let mut dark = (0.0f32, 0u32);
     let mut light = (0.0f32, 0u32);
 
     let mut consider = |row: u32, col: u32, even: bool| {
-        let luma = layout.sample_cell_mean(image, transform, row * grid + col).luma();
+        let luma = layout.sample_cell_core(image, mesh, row * grid + col).luma();
         if even {
             dark.0 += luma;
             dark.1 += 1;
@@ -767,13 +1089,13 @@ fn timing_levels(layout: &FrameLayout, image: &RgbImage, transform: &Homography)
 }
 
 /// Fits the per-frame classifier to the calibration ring.
-fn fit_classifier(layout: &FrameLayout, image: &RgbImage, transform: &Homography) -> Classifier {
+fn fit_classifier(layout: &FrameLayout, image: &RgbImage, mesh: &Mesh) -> Classifier {
     let labelled: Vec<(u16, crate::symbol::CellSample)> = layout
         .calibration_cells()
         .iter()
         .enumerate()
         .map(|(index, &cell)| {
-            (layout.calibration_value(index), layout.sample_cell(image, transform, cell))
+            (layout.calibration_value(index), layout.sample_cell_in(image, mesh, cell))
         })
         .collect();
     Classifier::fit(layout.alphabet(), &labelled)
@@ -793,24 +1115,27 @@ fn erasure_positions(doubtful: &[usize], bits: u32) -> Vec<usize> {
     positions
 }
 
-/// Reads a located frame down to its payload units, for one candidate profile.
-fn read_frame(candidate: &Candidate, image: &RgbImage, transform: &Homography) -> FrameReading {
+/// Reads a located frame as far as its header.
+fn open_frame(candidate: &Candidate, image: &RgbImage, transform: &Homography) -> FrameOpening {
     let layout = &candidate.layout;
-    let codec = &candidate.payload_codec;
 
-    let mut reading = FrameReading {
+    // The grid the finder patterns imply, bent to fit what the timing ring
+    // says the lens did to it.
+    let mesh = Mesh::fit(layout, image, transform);
+
+    let mut opening = FrameOpening {
         outcome: FrameOutcome::HeaderUnreadable,
         header: None,
-        units: Vec::new(),
-        units_rejected: 0,
-        doubtful_cells: 0,
-        total_cells: layout.data_cells().len(),
+        profile: candidate.id,
+        correction: mesh.largest_correction(),
+        mesh,
         pixels_per_cell: None,
+        corners: None,
     };
 
-    let headers = read_headers(layout, image, transform);
+    let headers = read_headers(layout, image, &opening.mesh);
     let Some(header) = headers[0].or(headers[1]) else {
-        return reading;
+        return opening;
     };
 
     // Two readable copies that name different frames mean the shutter caught a
@@ -819,29 +1144,65 @@ fn read_frame(candidate: &Candidate, image: &RgbImage, transform: &Homography) -
     if let (Some(top), Some(bottom)) = (headers[0], headers[1])
         && top.frame_seq != bottom.frame_seq
     {
-        reading.header = Some(header);
-        reading.outcome = FrameOutcome::Straddled;
+        opening.header = Some(header);
+        opening.outcome = FrameOutcome::Straddled;
+        return opening;
+    }
+    // Two profiles may share a grid and differ in what they paint in it. The
+    // header is written the same way for both, and says which this is.
+    if header.profile.profile().grid == layout.grid() {
+        opening.profile = header.profile;
+    } else {
+        // A header that names another geometry means this candidate's
+        // happened to produce a readable header for someone else's frame.
+        // Believing it would decode the payload against the wrong cell map.
+        return opening;
+    }
+
+    opening.header = Some(header);
+    opening.outcome = FrameOutcome::Decoded;
+    opening
+}
+
+/// Reads the payload of a frame whose header has been read.
+fn read_payload(candidate: &Candidate, image: &RgbImage, opening: &FrameOpening) -> FrameReading {
+    let layout = &candidate.layout;
+    let codec = &candidate.payload_codec;
+    let mesh = &opening.mesh;
+
+    let mut reading = opening.reading(layout.data_cells().len());
+    let Some(header) = opening.header else {
+        return reading;
+    };
+    if opening.outcome != FrameOutcome::Decoded {
         return reading;
     }
-    // A header that names a different profile means this candidate's geometry
-    // happened to produce a readable header for someone else's frame. Believing
-    // it would decode the payload against the wrong cell map.
-    if header.profile != candidate.id {
-        return reading;
-    }
-    reading.header = Some(header);
 
     // The classifier is fitted to this frame's own calibration ring, never to
     // the nominal palette: exposure and white balance move while the camera
     // records, so references from any other frame are already stale.
-    let classifier = fit_classifier(layout, image, transform);
+    let classifier = fit_classifier(layout, image, mesh);
     let bits = layout.profile().bits_per_cell();
 
-    let mut cells = Vec::with_capacity(layout.data_cells().len());
+    let samples: Vec<crate::symbol::CellSample> =
+        layout.data_cells().iter().map(|&cell| layout.sample_cell_in(image, mesh, cell)).collect();
+
+    // Read some of it against the ring, then all of it against what that first
+    // reading says the payload itself looks like. A few thousand cells are
+    // plenty to measure sixteen templates from, and reading every cell twice
+    // would double the cost of the most expensive stage for nothing.
+    let (subset, first): (Vec<crate::symbol::CellSample>, Vec<crate::symbol::Classification>) =
+        samples
+            .iter()
+            .step_by(REFIT_STRIDE)
+            .map(|sample| (*sample, classifier.classify(sample)))
+            .unzip();
+    let classifier = classifier.refit(&subset, &first);
+
+    let mut cells = Vec::with_capacity(samples.len());
     let mut doubtful = Vec::new();
-    for (index, &cell) in layout.data_cells().iter().enumerate() {
-        let sample = layout.sample_cell(image, transform, cell);
-        let call = classifier.classify(&sample);
+    for (index, sample) in samples.iter().enumerate() {
+        let call = classifier.classify(sample);
         cells.push(call.value);
         if call.confidence < ERASURE_CONFIDENCE {
             doubtful.push(index);
@@ -851,6 +1212,7 @@ fn read_frame(candidate: &Candidate, image: &RgbImage, transform: &Homography) -
 
     let raw = cells_to_bytes(&cells, bits, codec.raw_len());
     let erasures = erasure_positions(&doubtful, bits);
+    reading.cells = cells;
 
     // Erasure hints come from a heuristic. If they do not help, the same frame
     // may still decode without them, and a frame given up on is one somebody
@@ -1115,6 +1477,78 @@ mod tests {
     #[test]
     fn an_empty_file_is_refused_before_anything_is_painted() {
         assert!(Transmitter::new("empty.bin", &[], ProfileId::P2Standard, 1).is_err());
+    }
+
+    #[test]
+    fn a_code_already_taken_is_dropped_at_its_header() {
+        // A camera sees most codes more than once, and reading a payload is
+        // most of what a picture costs. The second picture of a code has to
+        // stop at the header, which is only visible from outside as a reading
+        // that never got as far as cells.
+        let file = incompressible(6_000);
+        let mut tx = Transmitter::new("twice.bin", &file, ProfileId::P1Conservative, 9).unwrap();
+        let mut rx = Receiver::new();
+
+        let frame = tx.next_frame(8).unwrap();
+        let first = rx.accept_image(&frame.image);
+        assert_eq!(first.outcome, FrameOutcome::Decoded);
+        assert!(first.total_cells > 0);
+
+        let again = rx.accept_image(&frame.image);
+        assert_eq!(again.outcome, FrameOutcome::Duplicate);
+        assert_eq!(again.total_cells, 0, "the payload of a repeated code was read");
+        assert!(again.corners.is_some(), "a repeated code still says where it is");
+    }
+
+    #[test]
+    fn a_picture_can_be_opened_in_one_place_and_absorbed_in_another() {
+        // What a browser does with several cores: readers that keep nothing
+        // open and read the pictures, and one receiver that never sees a
+        // picture folds in what they read, carried between them as bytes.
+        let file = incompressible(20_000);
+        let mut tx = Transmitter::new("apart.bin", &file, ProfileId::P1Conservative, 3).unwrap();
+        let reader = Receiver::new();
+        let mut collector = Receiver::new();
+
+        let mut frames = 0usize;
+        while !collector.is_complete() && frames < 100 {
+            let frame = tx.next_frame(8).unwrap();
+
+            let opening = reader.open(&frame.image).expect("located");
+            assert_eq!(opening.outcome, FrameOutcome::Decoded);
+            assert_eq!(opening.header.map(|h| h.frame_seq), Some(u32::try_from(frames).unwrap()));
+
+            let reading = reader.read(&frame.image, &opening);
+            let carried = FrameReading::from_bytes(&reading.to_bytes()).expect("unpacked");
+            assert_eq!(carried.outcome, reading.outcome);
+            assert_eq!(carried.header, reading.header);
+            assert_eq!(carried.units, reading.units);
+            assert_eq!(carried.corners, reading.corners);
+
+            assert_eq!(collector.absorb(carried).outcome, FrameOutcome::Decoded);
+            frames += 1;
+        }
+
+        assert!(collector.is_complete());
+        assert_eq!(collector.finish().unwrap().bytes, file);
+    }
+
+    #[test]
+    fn a_reading_cut_short_is_refused() {
+        // The bytes cross a boundary this crate does not control.
+        let file = incompressible(3_000);
+        let mut tx = Transmitter::new("cut.bin", &file, ProfileId::P1Conservative, 3).unwrap();
+        let frame = tx.next_frame(8).unwrap();
+        let bytes = Receiver::new().examine(&frame.image).to_bytes();
+
+        assert!(FrameReading::from_bytes(&bytes).is_some());
+        for length in [0, 1, 2, 10, 30, bytes.len() / 2, bytes.len() - 1] {
+            assert!(
+                FrameReading::from_bytes(&bytes[..length]).is_none(),
+                "{length} of {} bytes were accepted",
+                bytes.len()
+            );
+        }
     }
 
     #[test]

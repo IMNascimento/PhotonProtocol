@@ -12,7 +12,9 @@
 //! declaration of something the specification already defines once.
 
 use photon_core::detect::Detector;
-use photon_core::session::{FrameOutcome, Receiver as CoreReceiver, Transmitter};
+use photon_core::session::{
+    FrameOpening, FrameOutcome, FrameReading, FrameReport, Receiver as CoreReceiver, Transmitter,
+};
 use photon_core::{PROTOCOL_VERSION, ProfileId, RgbImage, SPEC_VERSION, profile::PROFILES};
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
@@ -163,7 +165,8 @@ impl Emitter {
         let frame = self.transmitter.next_frame(self.cell_px).map_err(|e| to_js(e.to_string()))?;
 
         let rgb = frame.image.as_raw();
-        for (pixel, chunk) in self.rgba.chunks_exact_mut(4).zip(rgb.chunks_exact(3)) {
+        let pixels = self.rgba.as_chunks_mut::<4>().0.iter_mut();
+        for (pixel, chunk) in pixels.zip(rgb.as_chunks::<3>().0) {
             pixel[0] = chunk[0];
             pixel[1] = chunk[1];
             pixel[2] = chunk[2];
@@ -211,6 +214,10 @@ impl Receiver {
     ///
     /// Returns a JSON report of what the frame yielded.
     ///
+    /// The buffer is taken rather than borrowed so that it can be read where it
+    /// lands. Borrowing it meant copying every pixel a second time to drop an
+    /// alpha channel nothing looks at.
+    ///
     /// # Errors
     ///
     /// Returns a message if the buffer does not match the stated dimensions,
@@ -218,47 +225,54 @@ impl Receiver {
     #[wasm_bindgen(js_name = acceptFrame)]
     pub fn accept_frame(
         &mut self,
-        rgba: &[u8],
+        rgba: Vec<u8>,
         width: u32,
         height: u32,
     ) -> Result<String, JsValue> {
-        let image = rgba_to_rgb(rgba, width, height).map_err(to_js)?;
+        let image = picture_from(rgba, width, height).map_err(to_js)?;
         let report = self.inner.accept_image(&image);
+        Ok(self.describe(&report))
+    }
 
-        let outcome = match report.outcome {
-            FrameOutcome::NotLocated => "notLocated",
-            FrameOutcome::Straddled => "straddled",
-            FrameOutcome::Decoded => "decoded",
-            FrameOutcome::Duplicate => "duplicate",
-            FrameOutcome::WrongSession => "wrongSession",
-            FrameOutcome::HeaderUnreadable => "headerUnreadable",
-            FrameOutcome::PayloadUnrecoverable => "payloadUnrecoverable",
-        };
+    /// Folds in a picture that a [`Reader`] read.
+    ///
+    /// Returns the same JSON report as [`Receiver::accept_frame`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a message if the bytes are not a reading.
+    pub fn absorb(&mut self, reading: &[u8]) -> Result<String, JsValue> {
+        let reading = FrameReading::from_bytes(reading)
+            .ok_or_else(|| to_js("these bytes are not a reading"))?;
+        let report = self.inner.absorb(reading);
+        Ok(self.describe(&report))
+    }
 
+    /// A frame report as JSON.
+    fn describe(&self, report: &FrameReport) -> String {
         let (accepted, needed) = self.inner.progress().unwrap_or((0, 0));
+        let sequence =
+            report.header.map_or_else(|| "null".to_owned(), |header| header.frame_seq.to_string());
 
-        // `null` rather than a placeholder when the frame was not located: a
-        // page showing "0.0 pixels per cell" would be reporting a measurement
-        // that was never taken.
-        let per_cell =
-            report.pixels_per_cell.map_or_else(|| "null".to_owned(), |value| format!("{value:.2}"));
-
-        Ok(format!(
+        format!(
             concat!(
                 r#"{{"outcome":"{}","newSymbols":{},"unitsAccepted":{},"unitsRejected":{},"#,
-                r#""doubtfulRate":{:.5},"pixelsPerCell":{},"accepted":{},"needed":{},"#,
-                r#""complete":{}}}"#
+                r#""doubtfulRate":{:.5},"pixelsPerCell":{},"correction":{},"corners":{},"#,
+                r#""sequence":{},"accepted":{},"needed":{},"complete":{}}}"#
             ),
-            outcome,
+            outcome_name(report.outcome),
             report.new_symbols,
             report.units_accepted,
             report.units_rejected,
             report.doubtful_rate(),
-            per_cell,
+            number(report.pixels_per_cell),
+            number(report.correction),
+            corners_json(report.corners),
+            sequence,
             accepted,
             needed,
             self.inner.is_complete(),
-        ))
+        )
     }
 
     /// Whether enough has been collected to rebuild the file.
@@ -275,6 +289,20 @@ impl Receiver {
         self.inner.manifest().map(|m| m.name.clone())
     }
 
+    /// The declared size of the file in bytes, once a manifest has arrived.
+    ///
+    /// A float because that is what JavaScript counts in, and exact for any
+    /// file this protocol could carry in a lifetime.
+    #[wasm_bindgen(js_name = fileSize)]
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "exact below 2^53 bytes, which is eight petabytes"
+    )]
+    pub fn file_size(&self) -> Option<f64> {
+        self.inner.manifest().map(|m| m.original_size as f64)
+    }
+
     /// Rebuilds the file.
     ///
     /// # Errors
@@ -283,6 +311,130 @@ impl Receiver {
     /// gave up and how close it came — rather than a bare failure.
     pub fn finish(&mut self) -> Result<Vec<u8>, JsValue> {
         self.inner.finish().map(|file| file.bytes).map_err(|e| to_js(format!("{}: {e}", e.code())))
+    }
+}
+
+/// The name a page knows an outcome by.
+const fn outcome_name(outcome: FrameOutcome) -> &'static str {
+    match outcome {
+        FrameOutcome::NotLocated => "notLocated",
+        FrameOutcome::Straddled => "straddled",
+        FrameOutcome::Decoded => "decoded",
+        FrameOutcome::Duplicate => "duplicate",
+        FrameOutcome::WrongSession => "wrongSession",
+        FrameOutcome::HeaderUnreadable => "headerUnreadable",
+        FrameOutcome::PayloadUnrecoverable => "payloadUnrecoverable",
+    }
+}
+
+/// A measurement as JSON: `null` rather than a placeholder when it was never
+/// taken. A page showing "0.0 pixels per cell" would be reporting something
+/// nobody measured.
+fn number(value: Option<f64>) -> String {
+    value.map_or_else(|| "null".to_owned(), |value| format!("{value:.2}"))
+}
+
+/// Four corners as JSON, or `null`.
+fn corners_json(corners: Option<[photon_core::Point; 4]>) -> String {
+    corners.map_or_else(
+        || "null".to_owned(),
+        |corners| {
+            let points: Vec<String> =
+                corners.iter().map(|p| format!("[{:.1},{:.1}]", p.x, p.y)).collect();
+            format!("[{}]", points.join(","))
+        },
+    )
+}
+
+/// Reads pictures, and keeps nothing.
+///
+/// A phone has eight cores and a [`Receiver`] uses one. Reading a picture is
+/// most of the work of a transfer and depends on no other picture, so a page
+/// can run several of these side by side, each in a worker of its own, and
+/// hand what they read to one receiver to be folded together.
+///
+/// Reading is in two steps because the header sits between a cheap half and an
+/// expensive one. [`Reader::open`] says which code a picture holds; the page,
+/// which knows which codes it already has, then either asks for the rest with
+/// [`Reader::read`] or moves on.
+#[wasm_bindgen]
+pub struct Reader {
+    inner: CoreReceiver,
+    held: Option<(RgbImage, FrameOpening)>,
+}
+
+impl Default for Reader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[wasm_bindgen]
+impl Reader {
+    /// A reader.
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new() -> Self {
+        Self { inner: CoreReceiver::new(), held: None }
+    }
+
+    /// Finds the frame in a picture and reads its header.
+    ///
+    /// Returns JSON: `outcome` is `opened` when the header was read, and
+    /// otherwise says why there is nothing more to read.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message if the buffer does not match the stated dimensions.
+    pub fn open(&mut self, rgba: Vec<u8>, width: u32, height: u32) -> Result<String, JsValue> {
+        let image = picture_from(rgba, width, height).map_err(to_js)?;
+        self.held = None;
+
+        let Some(opening) = self.inner.open(&image) else {
+            return Ok(r#"{"outcome":"notLocated"}"#.to_owned());
+        };
+
+        let outcome = match opening.outcome {
+            FrameOutcome::Decoded => "opened",
+            other => outcome_name(other),
+        };
+        let (sequence, session) = opening.header.map_or_else(
+            || ("null".to_owned(), "null".to_owned()),
+            |header| (header.frame_seq.to_string(), header.session_id.to_string()),
+        );
+        let summary = format!(
+            concat!(
+                r#"{{"outcome":"{}","sequence":{},"session":{},"pixelsPerCell":{},"#,
+                r#""correction":{},"corners":{}}}"#
+            ),
+            outcome,
+            sequence,
+            session,
+            number(opening.pixels_per_cell),
+            number(Some(opening.correction)),
+            corners_json(opening.corners),
+        );
+
+        if opening.outcome == FrameOutcome::Decoded {
+            self.held = Some((image, opening));
+        }
+        Ok(summary)
+    }
+
+    /// Reads the payload of the picture last opened.
+    ///
+    /// Returns the reading packed for [`Receiver::absorb`], or nothing if no
+    /// picture is being held.
+    pub fn read(&mut self) -> Vec<u8> {
+        self.held
+            .take()
+            .map(|(image, opening)| self.inner.read(&image, &opening).to_bytes())
+            .unwrap_or_default()
+    }
+
+    /// Lets go of the picture last opened without reading it.
+    pub fn release(&mut self) {
+        self.held = None;
     }
 }
 
@@ -297,8 +449,8 @@ impl Receiver {
 ///
 /// Returns a message if the buffer does not match the stated dimensions.
 #[wasm_bindgen(js_name = inspectFrame)]
-pub fn inspect_frame(rgba: &[u8], width: u32, height: u32) -> Result<String, JsValue> {
-    let image = rgba_to_rgb(rgba, width, height).map_err(to_js)?;
+pub fn inspect_frame(rgba: Vec<u8>, width: u32, height: u32) -> Result<String, JsValue> {
+    let image = picture_from(rgba, width, height).map_err(to_js)?;
     let detector = Detector::new();
     let found = detector.detect(&image).ok();
     let diagnosis = detector.diagnose(&image);
@@ -312,19 +464,13 @@ pub fn inspect_frame(rgba: &[u8], width: u32, height: u32) -> Result<String, JsV
     ))
 }
 
-/// Drops the alpha a canvas insists on carrying.
-fn rgba_to_rgb(rgba: &[u8], width: u32, height: u32) -> Result<RgbImage, String> {
+/// Wraps the buffer a canvas produced, alpha and all.
+fn picture_from(rgba: Vec<u8>, width: u32, height: u32) -> Result<RgbImage, String> {
     let expected = (width as usize) * (height as usize) * 4;
     if rgba.len() != expected {
         return Err(format!("expected {expected} bytes for {width}x{height}, got {}", rgba.len()));
     }
-
-    let mut rgb = Vec::with_capacity(expected / 4 * 3);
-    for pixel in rgba.chunks_exact(4) {
-        rgb.extend_from_slice(&pixel[..3]);
-    }
-
-    RgbImage::from_raw(width, height, rgb)
+    RgbImage::from_rgba(width, height, rgba)
         .ok_or_else(|| "frame dimensions do not match its buffer".to_owned())
 }
 
@@ -366,7 +512,7 @@ mod tests {
                 break;
             }
             let rgba = emitter.next_frame().expect("painted");
-            let report = receiver.accept_frame(&rgba, side, side).expect("accepted");
+            let report = receiver.accept_frame(rgba, side, side).expect("accepted");
             assert!(report.contains("\"outcome\":\"decoded\""), "{report}");
         }
 
@@ -376,13 +522,52 @@ mod tests {
     }
 
     #[test]
+    fn a_file_survives_being_read_in_one_place_and_collected_in_another() {
+        // The path the receiving page takes: pictures are read by readers that
+        // keep nothing, and what they read is folded together by a receiver
+        // that never sees a picture.
+        let file: Vec<u8> = (0..9000u32).map(|i| u8::try_from(i % 251).unwrap_or(0)).collect();
+        let mut emitter = Emitter::new("apart.bin", &file, 0x01, 8, 99).expect("prepared");
+        let side = emitter.side();
+
+        let mut reader = Reader::new();
+        let mut receiver = Receiver::new(None).expect("receiver");
+
+        for _ in 0..40 {
+            if receiver.is_complete() {
+                break;
+            }
+            let rgba = emitter.next_frame().expect("painted");
+            let summary = reader.open(rgba, side, side).expect("opened");
+            assert!(summary.contains("\"outcome\":\"opened\""), "{summary}");
+
+            let reading = reader.read();
+            assert!(!reading.is_empty(), "an opened picture yielded no reading");
+            let report = receiver.absorb(&reading).expect("absorbed");
+            assert!(report.contains("\"outcome\":\"decoded\""), "{report}");
+        }
+
+        assert!(receiver.is_complete(), "the transfer never completed");
+        assert_eq!(receiver.finish().expect("finished"), file);
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_reading_are_refused() {
+        // Checked through the core, because the binding's own error type only
+        // exists in a browser.
+        assert!(FrameReading::from_bytes(&[]).is_none());
+        assert!(FrameReading::from_bytes(&[1, 2, 3, 4]).is_none());
+        assert!(FrameReading::from_bytes(&[0xF7, 2, 1, 0, 0]).is_none());
+    }
+
+    #[test]
     fn a_mis_sized_buffer_is_refused_rather_than_read_past() {
         // A page can hand over any buffer it likes. Reading past one would be a
         // memory-safety bug reachable from a web page, so the check is asserted
         // directly rather than through the binding, which cannot run here.
-        assert!(rgba_to_rgb(&[0; 16], 100, 100).is_err());
-        assert!(rgba_to_rgb(&[], 1, 1).is_err());
-        assert!(rgba_to_rgb(&[0; 4], 1, 1).is_ok());
+        assert!(picture_from(vec![0; 16], 100, 100).is_err());
+        assert!(picture_from(Vec::new(), 1, 1).is_err());
+        assert!(picture_from(vec![0; 4], 1, 1).is_ok());
     }
 
     #[test]

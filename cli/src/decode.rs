@@ -98,6 +98,9 @@ pub(crate) fn run(
                 doubtful_cells: 0,
                 total_cells: 0,
                 pixels_per_cell: None,
+                cells: Vec::new(),
+                corners: None,
+                correction: None,
             },
         })
         .collect();
