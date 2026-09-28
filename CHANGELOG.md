@@ -16,19 +16,83 @@ Drafts are not interoperable with one another.
 
 ## [Unreleased]
 
+The first version that has moved a file from a monitor to a phone: an 818 KB
+picture to an iPhone, at 23.7 KB/s with ten codes shown a second and 38.2 KB/s
+with twenty, using `P1-conservative`. The denser profiles decode through the
+simulated camera and do not yet decode through the real one.
+`docs/phase-2-report.md` has the measurements and `docs/benchmarks` the
+figures to beat.
+
+### Fixed
+
+- **No real capture ever decoded, and this is why.** The classifier decided a
+  cell's shape by luma and its colour afterwards. The palette's blue has a
+  quarter of the luma of its white, so through a lens that blurs at all, a blue
+  cell's own pattern was fainter than what its bright neighbours spilt into it:
+  27% of blue cells and 10% of red ones were read as the wrong shape, and none
+  of the green or white. That put every frame at or over what its parity could
+  repair. Cells are now matched whole, in colour, against templates measured in
+  the same frame, and then matched again against templates measured from the
+  payload itself. Wrong cells in a typical capture fell from 9.3% to under
+  0.1%.
+- Finder patterns were not found in a well-lit capture at small sizes. Light
+  spreads into dark in a photograph, so the rings of a finder do not measure
+  1:1:3:1:1; they are now judged by where their middles fall, which spreading
+  does not move.
+- The sampling grid followed a homography, and a lens is not a pinhole. The grid
+  is now bent to fit the timing ring, which follows a lens that bends lines by
+  4% to within a tenth of a cell.
+- The sending page held each code for a number of display refreshes, assumed to
+  be sixtieths of a second. On a 144 Hz display the default was 28 ms a code,
+  which no phone camera can photograph whole. It now measures the display and
+  works in codes per second.
+- The sending page chose the densest profile the screen could paint. What
+  limits a transfer is the camera, which the sender cannot see. It now defaults
+  to `P1-conservative`.
+- The receiving page asked the camera for 4K. It now asks for 1080p, which is
+  a quarter of the work for every picture, and reads only the part of the
+  picture the code is in.
+- Sending a photograph of a few megabytes froze the sending page for many
+  seconds while Brotli searched it for savings it did not contain. Whether
+  input will shrink is now judged from three samples first.
+
 ### Added
 
-- Camera pixels per cell is measured from the detected frame and reported
-  everywhere: per frame by the receiver, averaged by `photon decode`, and live
-  on the receiving page. It is the measurement `SPEC.md` Q1 asks for, and the
-  only failure that filming longer does not fix.
-- The receiving page can read from the camera directly instead of from a saved
-  recording. The project's brief excluded this from version 1 because
-  `getUserMedia` yields less resolution than a camera app; the objection is now
-  measured rather than argued, with the page showing pixels per cell as it
-  reads and saying plainly when there are too few.
+- `P4-balanced`, profile `0x04`: the alphabet and parity of `P1-conservative`
+  on a 128-cell grid, carrying 4931 bytes a frame. The profiles were cut for
+  cameras that record 4K and a browser is usually given 1080p, at which
+  `P1-conservative` was the only one that read. This is the rung that was
+  missing.
+- `photon film`: a simulated phone camera pointed at a simulated monitor, with
+  the display and the camera on separate clocks. Writes the pictures a browser
+  would have been handed, as PNGs and as a `.y4m` file Chrome plays as a
+  camera.
+- `photon decode --truth`: given the file that was sent, counts the cells read
+  wrongly, by painted colour and by region of the frame.
+- `photon bench`: how long each stage of reading a picture takes.
+- `photon inspect`: what can be said of a picture nobody has the file for —
+  where the grid landed, and how well the calibration ring reads itself.
+- `tools/e2e`: the real pages driven in a real browser. `receive.mjs` runs the
+  receiving page with simulated footage as its camera and checks the file it
+  offers; `send.mjs` photographs what the sending page paints; `matrix.mjs`
+  films a table of conditions and says how each went.
+- The receiving page reads several pictures at once, in as many workers as the
+  device has cores to spare, and drops a code it already has at its header
+  rather than after reading its payload.
+- The receiving page outlines the code it has found, says how long is left, and
+  offers the file by itself when it is complete.
+- Both pages in Portuguese as well as English, chosen from the browser's
+  language.
+- With `?capture`, both pages report what they measure to the development
+  server, so that what a real phone did can be read from a terminal.
 
-Not yet validated against a real camera — see the status table in the README.
+### Changed
+
+- `SPEC.md` is draft 0.2. The wire format of the existing profiles is
+  unchanged. `S_min` falls to 4 and 6 pixels, the default profile becomes
+  `P1-conservative`, display timing is given in time rather than refreshes, and
+  the decoder guidance of §9.1 describes what was found to be necessary.
+- Reading a picture takes 15 ms on a desktop core, from 50 ms.
 
 ## [0.3.0] — 2026-08-11
 

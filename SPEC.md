@@ -1,6 +1,6 @@
 # PhotonProtocol — Specification
 
-**Version:** 0.1 (draft)
+**Version:** 0.2 (draft)
 **Status:** DRAFT. The wire format is unstable until this document is tagged `1.0`.
 Implementations built against a draft MUST NOT be assumed interoperable with
 any other draft.
@@ -100,18 +100,24 @@ Each cell is a square of `S x S` device pixels. `S` MUST be at least the
 profile's minimum cell size `S_min` (§8), and SHOULD be a multiple of 4 so that
 all 16 shape sub-cells (§4.3.1) cover the same number of pixels.
 
-`S_min` is 8 for a profile with 8 shapes and 6 for a profile with 4 shapes,
+`S_min` is 6 for a profile with 8 shapes and 4 for a profile with 4 shapes,
 because it is the shape alphabet and not the grid that sets the limit. The
-8-shape alphabet uses each of the 16 sub-cells independently, so each needs
-pixels of its own; the 4-shape alphabet is four half-planes, whose finest
-feature is half a cell rather than a quarter of one.
+8-shape alphabet uses each of the 16 sub-cells independently, so a cell has to
+be wide enough for four columns of at least a pixel each; the 4-shape alphabet
+is four half-planes, whose finest feature is half a cell rather than a quarter
+of one. An emitter fitting a code to a screen too small for the profile MUST
+choose a sparser profile rather than a smaller cell.
 
-Below `S_min` the shape is lost while the colour survives, and the shape is most
-of the payload — 3 of the 5 bits in P2-standard. For the 8-shape profiles the
-loss is a cliff rather than a slope: painted and read back with no camera in the
-path at all, P2-standard reads 5.9% of its cells wrongly at `S = 7` and 0.0% at
-`S = 8`, and P3-dense 2.5% and 0.0%. An emitter fitting a code to a screen too
-small for the profile MUST choose a sparser profile rather than a smaller cell.
+`S_min` limits what is *painted*. What a camera can *read* is a separate
+question with a larger answer, counted in the camera's pixels rather than the
+screen's, and an emitter cannot see the camera. §8 gives the figures measured
+so far.
+
+Draft 0.1 put `S_min` at 8 and 6, on the strength of a measurement: painted and
+read back with no camera in the path, P2-standard read 5.9% of its cells
+wrongly at `S = 7` and none at `S = 8`. The cliff was the reference decoder's
+and not the format's. It judged a cell's shape by luma alone (§9.1, step 8),
+and the same frames read without error down to `S = 4` once it did not.
 
 `S` is not always a free choice: an emitter fits the code to a screen it did not
 choose, and rounding the cell down to the next multiple of 4 can cost a fifth of
@@ -427,6 +433,18 @@ partial update.
 The emission rate MUST NOT exceed half the display refresh rate. On a 60 Hz
 display this caps emission at 30 frames per second.
 
+That is a ceiling and not a recommendation. A camera does not take a picture in
+an instant: a rolling shutter exposes each row at its own moment, the display
+repaints top to bottom over most of a refresh, and each of its pixels takes
+milliseconds to settle. Between them, a picture of a phone held upright spans
+some 40 to 60 ms of the display's time, and a picture that spans a change of
+frame is part of one frame and part of the next. An emitter SHOULD hold each
+frame for about 100 ms, and SHOULD NOT hold one for less than 50 ms.
+
+An emitter MUST measure how long a frame is held in time, not in refreshes
+assumed to be a sixtieth of a second. "Four refreshes" is 67 ms on a 60 Hz
+display and 28 ms on a 144 Hz one.
+
 An emitter MUST loop indefinitely, and MUST set the `LOOP_RESTART` flag (§5.1)
 on the first frame of each pass so a decoder can report coverage.
 
@@ -705,15 +723,42 @@ header declares which one is in use.
 
 | profile | id | grid `G` | shapes | colours | `b` | `S_min` | header | payload RS | data cells | payload capacity |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `P1-conservative` | `0x01` | 96 | 4 | 4 | 4 | 6 | `RS(40,20)` x2 | `RS(255,175)` | 7622 | 2611 B |
-| `P2-standard` | `0x02` | 128 | 8 | 4 | 5 | 8 | `RS(42,20)` x2 | `RS(255,199)` | 14502 | 7047 B |
-| `P3-dense` | `0x03` | 160 | 8 | 8 | 6 | 8 | `RS(54,20)` x2 | `RS(255,223)` | 23270 | 15244 B |
+| `P1-conservative` | `0x01` | 96 | 4 | 4 | 4 | 4 | `RS(40,20)` x2 | `RS(255,175)` | 7622 | 2611 B |
+| `P2-standard` | `0x02` | 128 | 8 | 4 | 5 | 6 | `RS(42,20)` x2 | `RS(255,199)` | 14502 | 7047 B |
+| `P3-dense` | `0x03` | 160 | 8 | 8 | 6 | 6 | `RS(54,20)` x2 | `RS(255,223)` | 23270 | 15244 B |
+| `P4-balanced` | `0x04` | 128 | 4 | 4 | 4 | 4 | `RS(42,20)` x2 | `RS(255,175)` | 14502 | 4931 B |
 
 `S_min` is the smallest cell in device pixels the profile may be painted at
 (§4.1). Multiplied by `G + 8` it gives the smallest square of screen the profile
-can be sent from: 624 pixels for `P1-conservative`, 1088 for `P2-standard` and
-1344 for `P3-dense`. A 1080p display held in landscape can therefore carry
-`P2-standard` and not `P3-dense`, which is why the default is the one it is.
+can be sent from: 416 pixels for `P1-conservative`, 544 for `P4-balanced`, 816
+for `P2-standard` and 1008 for `P3-dense`.
+
+What the receiving camera needs is the larger constraint, and it is counted in
+the camera's own pixels per cell. Measured through a simulated phone camera
+(`docs/phase-2-report.md`), not yet through a real one:
+
+| profile | camera pixels per cell | code width in the picture | which needs |
+| --- | --- | --- | --- |
+| `P1-conservative` | 6 | 624 px | 720p, from close up |
+| `P4-balanced` | 6.5 | 884 px | 1080p, from close up |
+| `P2-standard` | 8 | 1088 px | 4K |
+| `P3-dense` | 8 | 1344 px | 4K |
+
+Through a real phone only `P1-conservative` has been read so far. The others
+are held back by the registration of the grid rather than by the size of their
+cells (§12, Q4).
+
+The 4-shape alphabet reads at fewer pixels than the 8-shape one because its
+finest feature is half a cell rather than a quarter. `P4-balanced` is the
+alphabet and parity of `P1-conservative` on the grid of `P2-standard`. It is
+numbered last because it was defined last; in what a frame carries it falls
+between the first two. It exists because the first three profiles were cut for
+cameras that record 4K, and a browser is usually given 1080p, at which
+`P1-conservative` was the only one that read.
+
+Two profiles on the same grid have the same reserved regions and cannot be told
+apart by geometry. A decoder tells them apart the only way it can, by
+`profile_id`, which is why the header is written without the alphabet (§4.2.6).
 
 Derived quantities, for cross-checking an implementation:
 
@@ -722,6 +767,7 @@ Derived quantities, for cross-checking an implementation:
 | `P1-conservative` | 80 | 4 | 40 | 1594 (17.3%) | 3811 | 14 x `RS(255,175)` + `RS(241,161)` | 31.4% | 31.5% |
 | `P2-standard` | 112 | 3 | 42 | 1882 (11.5%) | 9063 | 35 x `RS(255,199)` + `RS(138,82)` | 22.0% | 22.2% |
 | `P3-dense` | 144 | 3 | 54 | 2330 (9.1%) | 17452 | 68 x `RS(255,223)` + `RS(112,80)` | 12.5% | 12.7% |
+| `P4-balanced` | 112 | 3 | 42 | 1882 (11.5%) | 7251 | 28 x `RS(255,175)` + `RS(111,31)` | 31.4% | 32.0% |
 
 The two rightmost columns measure different things and must not be conflated.
 `p/255` is the parity fraction of the code and describes its correction
@@ -730,8 +776,17 @@ reach the transport layer, and it is slightly larger because the shortened
 trailing codeword pays full parity over fewer data bytes. Throughput is governed
 by the second.
 
-`P2-standard` is the default. An emitter MUST implement `P2-standard`; a decoder
-MUST implement all three.
+An emitter MUST implement `P1-conservative`, and SHOULD use it unless told
+otherwise. A decoder MUST implement all four.
+
+The channel is simplex: an emitter cannot find out what camera it is being
+filmed by. A code too dense for the camera looks, to the person sending it,
+exactly like one that is not, and the only symptom is a receiver that never
+finishes. So the default is the profile every camera can read, and the denser
+ones are for someone who knows theirs. Draft 0.1 made `P2-standard` the
+default, reasoning from what a 1080p display can paint; what a phone's browser
+is given by its camera is usually 1080p as well, which resolves
+`P1-conservative` and does not resolve `P2-standard`.
 
 The parity rates run opposite to intuition on purpose: the conservative profile
 spends *more* of its smaller frame on parity. A profile is a single point on a
@@ -754,16 +809,32 @@ This section is informative except where it uses MUST. A conforming decoder may
 work any way it likes provided it accepts every frame a conforming emitter
 produces.
 
-1. Locate four finder patterns in the video frame.
+1. Locate four finder patterns in the video frame. Judge a candidate by where
+   the middles of its rings fall rather than by how wide the rings look: in a
+   photograph of a bright screen light spreads into dark, and the rings of a
+   well-exposed finder measure nearer 0.6:1.4:2.6:1.4:0.6 than 1:1:3:1:1. The
+   middle of a ring does not move.
 2. Compute the homography from their centres to the nominal grid.
 3. Verify it against the alignment marker; reject the detection if the
    reprojection error is large.
 4. Resolve orientation from the orientation tag (§4.2.2).
-5. Recover `G` from the timing ring and check it against the profile once the
-   header is read.
-6. Read both header bands, RS-decode, verify `magic` and `header_crc16`.
+5. Locate the cells of the timing ring and bend the sampling grid to fit them.
+   A homography is exact for a flat screen seen through a pinhole and a phone
+   is neither: a lens bends straight lines by around a percent, which across
+   a hundred cells is a whole cell. The correction inside the frame can be
+   blended from its four edges, and what is left over shows at the alignment
+   marker.
+6. Read both header bands, RS-decode, verify `magic` and `header_crc16`. If the
+   frame is one already decoded, stop: a camera sees most frames more than
+   once, and everything after this step is most of the cost of a picture.
 7. Sample the calibration ring and fit a per-frame classifier.
-8. Classify data cells, optionally with per-cell confidence.
+8. Classify data cells, optionally with per-cell confidence. Decide shape and
+   colour **together, in colour**: match the whole cell against what each
+   symbol looked like in the calibration ring. Deciding shape first, by luma,
+   fails on a real camera. The palette's blue has a quarter of the luma of its
+   white, so the pattern of a blue cell is fainter in luma than what bright
+   neighbours spill into its unpainted half, and a quarter of all blue cells
+   are read as the wrong shape.
 9. De-interleave, RS-decode the payload, with erasures where confidence is low.
 10. Parse units, verify each CRC-32C, keep those that pass.
 11. Feed `RQ_SYMBOL` units to the RaptorQ decoder; take the manifest from the
@@ -903,6 +974,13 @@ screen occupies. If a 4K recording of a phone screen gives a code area of about
 Phase 2 should establish the minimum viable pixels per cell and the profiles
 should be re-cut around it.
 
+*Phase 2 measured this against a simulated camera.* The 4-shape alphabet reads
+at 6 camera pixels per cell and the 8-shape alphabet at 8, so at the 1080p a
+browser is usually given, `P1-conservative` was the only profile of the
+original three that read. `P4-balanced` was added as the rung that was
+missing. See `docs/phase-2-report.md`. The figures want confirming with real
+cameras before the table is settled.
+
 **Q2 — The eighth colour.** The 8-colour palette pairs white with grey, and they
 differ only in luminance, which the camera's auto-exposure is actively varying.
 Alternatives: replace grey with an eighth hue at 45-degree spacing and rely
@@ -918,6 +996,15 @@ set so each profile decodes at a chosen point on that curve with margin.
 a flat screen. If Phase 2 shows meaningful residual distortion — lens barrel
 distortion at short range is the likely culprit — the format needs a lattice of
 markers, which is a wire-format change and therefore must be decided before 1.0.
+
+*Phase 2:* against a simulated lens, blending the timing ring's measurements
+inwards followed the grid to within a tenth of a cell and no lattice was
+needed. A real lens disagreed. Through an iPhone the interior of the code sits
+up to 0.3 of a cell from where the homography puts it while its perimeter sits
+where it should, so there is nothing at the perimeter to measure.
+`P1-conservative` has cells large enough to be read regardless; the denser
+profiles do not decode. A measurement inside the code is needed, whether from
+marks placed there or from the payload itself. See `docs/phase-2-report.md`.
 
 **Q5 — Erasure signalling.** Erasure decoding roughly doubles RS correction
 capacity, and §5.2.3 permits it, but the format gives the decoder no help in
@@ -940,6 +1027,13 @@ refresh rate, which is a safe assumption, not a measured one. Rolling shutter
 means a video frame can contain the top of one code and the bottom of the next.
 The header duplication of §4.2.6 makes such a frame detectable — the two copies
 will disagree — but the format does not yet let a decoder *use* the good half.
+
+*Phase 2, simulated:* with frames held for 100 ms a camera at 30 frames per
+second catches every one of them whole, and at 50 ms it catches nine in ten.
+Most of what the rest lose is recoverable in principle — a picture that spans a
+change holds most of one frame and most of another — but not while every
+codeword is interleaved across the whole frame. Codewords kept within bands of
+the frame would let a decoder keep the bands that were whole.
 
 **Q7 — Symbol ordering across passes.** §6 requires source symbols first and
 distinct ESIs afterwards, but does not specify the repair schedule. If a receiver

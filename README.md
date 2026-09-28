@@ -2,14 +2,14 @@
 
 [![CI](https://github.com/IMNascimento/PhotonProtocol/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/IMNascimento/PhotonProtocol/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#licence)
-[![Specification](https://img.shields.io/badge/spec-0.1%20draft-orange.svg)](SPEC.md)
+[![Specification](https://img.shields.io/badge/spec-0.2%20draft-orange.svg)](SPEC.md)
 
-**Move a file from one phone to another with nothing but a screen and a
+**Move a file from one device to another with nothing but a screen and a
 camera.** No network, no cable, no pairing, no Bluetooth, no account, no server.
 
-One device paints the file as a sequence of dense visual codes. The other films
-that screen with its ordinary camera app. A decoder reads the recording back
-into the original bytes and checks them against a SHA-256 digest.
+One device paints the file as a sequence of dense visual codes. The other points
+its camera at that screen. A decoder reads the pictures back into the original
+bytes and checks them against a SHA-256 digest.
 
 > *Português: [README.pt-BR.md](README.pt-BR.md)*
 
@@ -23,7 +23,7 @@ flowchart LR
         A[Pick a file] --> B[Web page paints<br/>animated codes]
     end
     subgraph R [Receiver]
-        C[Film the screen<br/>with the camera app] --> D[Web page reads<br/>the video]
+        C[Point the camera<br/>at the screen] --> D[Web page reads<br/>the pictures]
         D --> E[File, digest verified]
     end
     B -. photons .-> C
@@ -44,8 +44,8 @@ correctness.
 ## Status
 
 **Try it: [imnascimento.github.io/PhotonProtocol](https://imnascimento.github.io/PhotonProtocol/)**
-— open the sender on one device, film it with another, and give the recording
-to the receiver. Both pages run entirely on your device.
+— open the sender on one device, open the receiver on another and point its
+camera at the first. Both pages run entirely on your device.
 
 The wire format is unstable until [`SPEC.md`](SPEC.md) is tagged `1.0`, and
 drafts are not interoperable with each other.
@@ -54,23 +54,45 @@ drafts are not interoperable with each other.
 | --- | --- | --- |
 | 0 | Specification draft, workspace, CI | done |
 | 1 | Encoder, decoder, frame detection, synthetic channel simulator | done |
-| 2 | Bench command line, `photon encode` / `photon decode` | tooling done; **no real footage decoded yet** |
+| 2 | Bench command line, simulated camera, end-to-end browser tests | done against a **simulated** camera; a real one is next |
 | 3 | Sender page | done |
-| 4 | Receiver page, deployed to GitHub Pages | done |
-| 5 | Optimisation, driven by phase 1 and 2 measurements | |
+| 4 | Receiver page, reading live from the camera | done |
+| 5 | Optimisation, driven by measurements | under way |
 
-**Nothing has been filmed yet.** Every measurement so far is against a
-*modelled* camera. The moment a real recording is decoded, several of the
-numbers in [`docs/phase-1-report.md`](docs/phase-1-report.md) should be expected
-to move, and the profile table with them.
+**On a real phone.** An iPhone in Safari, pointed by hand at a 1080p monitor,
+received an 818 KB picture with `P1-conservative` at 23.7 KB/s with ten codes
+shown a second, and at 38.2 KB/s with twenty. The denser profiles did not
+decode on it: the phone's lens moves the middle of the code by up to 0.3 of a
+cell relative to its edges, which `P1-conservative` has cells large enough to
+shrug off and the others have not.
+[`docs/benchmarks`](docs/benchmarks/README.md) has the figures.
 
-No throughput figure is quoted here on purpose. The target is to beat the
-state of the art, but the number that goes in this README will be one that was
-measured in phase 2, not one that was hoped for in phase 0.
+**What has been simulated.** Every figure below comes from
+`photon film`, which models a phone camera pointed at a monitor — rolling
+shutter, the display's own scan-out and pixel response, lens distortion, the
+colour filter array, the camera's sharpening and tone curve, 4:2:0 colour —
+and from the real pages running in a real browser with that footage as the
+camera. It is a model. It reproduced the failure people reported with real
+phones, exactly, and what it said of `P1-conservative` the phone then bore
+out. What it says of the denser profiles the phone did not: the model bends a
+picture less than a real lens does.
 
-The first measurements are in [`docs/phase-1-report.md`](docs/phase-1-report.md),
-including a negative result: the classifier's confidence margin does not track
-error well enough for erasure decoding to be earning its place.
+| Profile | Camera | Codes a second | Throughput |
+| --- | --- | --- | --- |
+| `P1-conservative` | 1080p, 720p from close up | 10 to 15 | 25 to 38 KB/s |
+| `P4-balanced` | 1080p, from close up | 10 to 15 | 48 to 70 KB/s |
+| `P2-standard`, `P3-dense` | 4K | 10 | 70 to 150 KB/s |
+
+End to end, through the receiving page in Chrome slowed to a quarter of desktop
+speed to stand in for a phone, a 2.7 MB photograph arrived in 107 seconds with
+its digest verified.
+
+[`docs/phase-2-report.md`](docs/phase-2-report.md) has the measurements and
+what they changed. The short version: the first decoder never decoded a real
+capture, the cause was one decision in the classifier, and it could not have
+been found without a camera model harsh enough to reproduce it.
+[`docs/phase-1-report.md`](docs/phase-1-report.md) is the earlier report, whose
+channel model was too kind to show the fault.
 
 ## The format, briefly
 
@@ -104,9 +126,11 @@ Four layers, each depending only on the one below:
 | Transport | RaptorQ encoding symbols | the fountain code itself |
 | Session | the file | SHA-256, end to end |
 
-Three profiles trade density against robustness. `P2-standard` is the default;
-`P1-conservative` spends *more* of its smaller frame on parity, because a
-profile is a point on a robustness curve rather than a density dial.
+Four profiles trade density against robustness. `P1-conservative` is the
+default, because the sender cannot see the camera it is being filmed by and a
+code too dense for it looks exactly like one that is not. It spends *more* of
+its smaller frame on parity, because a profile is a point on a robustness curve
+rather than a density dial.
 
 ## Repository layout
 
@@ -115,7 +139,8 @@ SPEC.md          the protocol — the actual product
 core/            photon-core: the protocol, no I/O, no platform
 cli/             photon-cli: bench command line, where numbers get measured
 wasm/            photon-wasm: WebAssembly bindings, an adapter and nothing more
-tools/           independent derivations of every constant, plus the site build
+tools/           independent derivations of every constant, the site build,
+                 and the end-to-end tests
 web-shared/      landing page and the one stylesheet
 web-emitter/     the sending page
 web-decoder/     the receiving page
@@ -134,7 +159,9 @@ cargo run --release -p photon-cli -- decode recording.mp4 --out .
 frames were located, how many survived, how many were duplicates, and two
 throughput figures — one over the whole recording, one over the frames it
 actually needed. Reading a directory of extracted frames works too, and needs no
-`ffmpeg`.
+`ffmpeg`. Given the file that was sent (`--truth`), it also counts the cells it
+read wrongly, by colour and by region of the frame, which is how a fault is
+told from a poor capture.
 
 ## Building
 
@@ -151,8 +178,44 @@ For the site:
 ```bash
 wasm-pack build wasm --release --target web --out-dir pkg
 node tools/build-site.mjs site
-python -m http.server -d site 8080     # then open http://localhost:8080
 ```
+
+## Trying it between a computer and a phone
+
+A browser only offers the camera to a page loaded over HTTPS, so the pages have
+to be served that way even on a home network:
+
+```bash
+node tools/serve.mjs
+```
+
+It prints two addresses. Open the sender on the computer and the receiver on
+the phone, which has to be on the same network. Both browsers warn once about
+the certificate, which is self-signed; continue past it. With `?capture` in the
+address, as printed, both pages report what they measure to the terminal and
+the receiver sends the pictures it could not read to `./captures` — which is
+what to attach to a bug report.
+
+## Testing without a phone
+
+```bash
+cargo build --release -p photon-cli
+cd tools/e2e && npm install && cd ../..
+
+# A table of cameras, distances and code rates, and how each went.
+node tools/e2e/matrix.mjs photo.jpg
+
+# The real receiving page, in Chrome, with simulated footage as its camera.
+target/release/photon film photo.jpg --out filmed --y4m --no-png --seconds 12 --hold 6
+node tools/e2e/receive.mjs filmed/camera.y4m photo.jpg --throttle 4
+
+# The real sending page, photographed pixel for pixel and decoded.
+node tools/e2e/send.mjs photo.jpg sent
+target/release/photon decode sent --truth photo.jpg
+```
+
+`--throttle 4` slows the browser to a quarter of its speed, which is roughly a
+mid-range phone. `photon bench` times each stage of reading a picture.
 
 The tools that derive the specification's constants need only Node:
 
