@@ -2,140 +2,96 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<link rel="icon" href="data:,">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PhotonProtocol — receive</title>
+<title data-i18n-title="title">PhotonProtocol — receive</title>
 <link rel="stylesheet" href="../shared/style.css">
 </head>
 <body>
 
-<h1>Receive a file</h1>
-<p class="tagline">
-  Point this device's camera at the other screen, or give it a video you
-  already recorded.
+<h1 data-i18n="heading">Receive a file</h1>
+<p class="tagline" data-i18n="tagline">
+  Point this device's camera at the screen that is sending.
 </p>
 
-<fieldset>
-  <legend>Where the frames come from</legend>
-
-  <div class="row" style="margin-top:0">
-    <button id="mode-camera">Use the camera</button>
-    <button id="mode-file" class="secondary">Use a recording</button>
-  </div>
-
-  <div id="camera-pane" class="hidden">
-    <p class="note">
-      Live capture is the quickest way to try this, and the lower-quality one:
-      a browser is usually given less resolution than the camera app records at.
-      The page shows you how many camera pixels are landing on each cell, which
-      is the number that decides whether it can work at all. If it is low, step
-      closer.
-    </p>
-    <video id="preview" playsinline muted autoplay
-           style="width:100%;border-radius:10px;background:#000"></video>
-  </div>
-
-  <div id="file-pane" class="hidden">
-    <label for="video">The video from your camera roll</label>
-    <input type="file" id="video" accept="video/*">
-    <p class="note">
-      Recorded with the camera app, this gets the full sensor resolution, which
-      is what the format was designed around.
-    </p>
-  </div>
-
-  <p class="note">
-    Nothing is uploaded either way. Everything is read on this device.
-  </p>
-</fieldset>
-
-<fieldset>
-  <legend>Settings</legend>
-  <label for="profile">Profile</label>
-  <select id="profile"></select>
-  <p class="note">
-    Leave this alone. The frames say which profile drew them, so there is
-    nothing to match between the two devices.
-  </p>
-</fieldset>
-
-<div class="row">
-  <button id="start" disabled>Start</button>
-  <button id="stop" class="secondary hidden">Give up</button>
+<div id="viewer" class="viewer hidden">
+  <video id="preview" playsinline muted autoplay></video>
+  <canvas id="overlay"></canvas>
+  <div id="hint" class="viewer-hint"></div>
 </div>
-<p class="note">
-  Once started this reads until it has the whole file, then stops on its own and
-  offers it to you. It does not matter that you joined the sender halfway
-  through — it keeps going into the next pass. "Give up" is only there for when
-  you want to stop early and see how far it got.
-</p>
 
 <div id="live" class="hidden">
-  <h2>Progress</h2>
   <progress id="bar" value="0" max="1"></progress>
-  <dl class="facts">
-    <dt>Blocks</dt><dd id="fact-blocks">—</dd>
-    <dt>Pixels per cell</dt><dd id="fact-percell">—</dd>
-    <dt>Frames read</dt><dd id="fact-frames">—</dd>
-    <dt>Frames used</dt><dd id="fact-used">—</dd>
-    <dt>Code not found</dt><dd id="fact-missed">—</dd>
-    <dt>Caught mid-change</dt><dd id="fact-straddled">—</dd>
-    <dt>Header unreadable</dt><dd id="fact-header">—</dd>
-    <dt>Cells unreadable</dt><dd id="fact-cells">—</dd>
-    <dt>Doubtful cells</dt><dd id="fact-doubtful">—</dd>
-    <dt>File</dt><dd id="fact-name">—</dd>
-  </dl>
+  <p class="headline" id="headline">—</p>
   <p class="note" id="aim"></p>
-  <div class="row" id="sample-row" style="display:none">
-    <a id="sample" class="note"></a>
-  </div>
 </div>
 
 <div id="status" class="status hidden"></div>
 
-<div id="result" class="row hidden">
-  <a id="download" class="hidden"></a>
+<div id="result" class="hidden">
+  <img id="picture" class="received hidden" alt="">
+  <div class="row">
+    <a id="download" class="button"></a>
+  </div>
 </div>
 
-<h2>If it does not work</h2>
-<p class="note">
-  This page reports which stage gave up, not just that it failed. The three
-  common outcomes have different fixes:
-</p>
+<div class="row">
+  <button id="start" disabled data-i18n="start">Start the camera</button>
+  <button id="stop" class="secondary hidden" data-i18n="stop">Stop</button>
+</div>
+
+<details id="details">
+  <summary data-i18n="detailsSummary">Details and settings</summary>
+
+  <dl class="facts" id="facts">
+    <dt data-i18n="factCamera">Camera</dt><dd id="fact-camera">—</dd>
+    <dt data-i18n="factBlocks">Blocks</dt><dd id="fact-blocks">—</dd>
+    <dt data-i18n="factRate">Rate</dt><dd id="fact-rate">—</dd>
+    <dt data-i18n="factPerCell">Pixels per cell</dt><dd id="fact-percell">—</dd>
+    <dt data-i18n="factSpeed">Pictures read</dt><dd id="fact-frames">—</dd>
+    <dt data-i18n="factUsed">New codes</dt><dd id="fact-used">—</dd>
+    <dt data-i18n="factRepeated">Codes seen again</dt><dd id="fact-repeated">—</dd>
+    <dt data-i18n="factMissed">Code not found</dt><dd id="fact-missed">—</dd>
+    <dt data-i18n="factStraddled">Caught mid-change</dt><dd id="fact-straddled">—</dd>
+    <dt data-i18n="factHeader">Header unreadable</dt><dd id="fact-header">—</dd>
+    <dt data-i18n="factCells">Cells unreadable</dt><dd id="fact-cells">—</dd>
+    <dt data-i18n="factTimes">Time per picture</dt><dd id="fact-times">—</dd>
+    <dt data-i18n="factFile">File</dt><dd id="fact-name">—</dd>
+  </dl>
+
+  <label for="quality" data-i18n="qualityLabel">Camera resolution</label>
+  <select id="quality">
+    <option value="1080" data-i18n="quality1080">1080p — recommended</option>
+    <option value="2160" data-i18n="quality2160">4K — sharper, slower</option>
+    <option value="720" data-i18n="quality720">720p — for a slow phone</option>
+  </select>
+
+  <div class="row">
+    <button id="mode-file" class="secondary" data-i18n="useRecording">Read a recording instead</button>
+  </div>
+  <div id="file-pane" class="hidden">
+    <label for="video" data-i18n="recordingLabel">A video of the sending screen</label>
+    <input type="file" id="video" accept="video/*">
+  </div>
+
+  <div class="row" id="sample-row" style="display:none">
+    <a id="sample" class="note"></a>
+  </div>
+
+  <p class="note" data-i18n="privacy">
+    Nothing is uploaded. Everything is read on this device.
+  </p>
+</details>
+
+<h2 data-i18n="tipsHeading">For a quick transfer</h2>
 <ul class="note">
-  <li>
-    <strong>Too few pixels per cell</strong> — below about five, the shapes in
-    each cell stop being separable no matter what else is right, and error
-    correction cannot invent detail that was never recorded. Step closer, or
-    switch to recording with the camera app and loading the file here.
-  </li>
-  <li>
-    <strong>Caught mid-change</strong> — the sending screen is changing faster
-    than this camera can capture a whole code, so each picture is half of one
-    and half of the next. Raise "hold each code" on the sending device. This is
-    the usual outcome when filming a computer monitor with a phone.
-  </li>
-  <li>
-    <strong>The code was not found</strong> in most frames — the screen is too
-    blurred or too reflective. Hold steadier and move the glare off it.
-  </li>
-  <li>
-    <strong>Not enough blocks</strong> — you simply stopped too early. Keep
-    going; the sender never repeats itself, so every extra second is new data.
-  </li>
+  <li data-i18n="tipFill">Get close enough for the code to fill the width of the picture.</li>
+  <li data-i18n="tipSteady">Hold still, square on to the screen.</li>
+  <li data-i18n="tipGlare">Keep lamps and windows from reflecting on the screen.</li>
+  <li data-i18n="tipBright">Turn the sending screen's brightness up.</li>
 </ul>
 
-<h2>Sending a picture for diagnosis</h2>
-<p class="note">
-  If it keeps failing, this page offers one of the pictures it could not read,
-  exactly as the decoder saw it. Run it through the command line and it will
-  print every measurement it took:
-</p>
-<pre class="note"><code>photon decode picture.png</code></pre>
-<p class="note">
-  A directory of pictures works too, and neither needs ffmpeg.
-</p>
-
-<p class="note"><a href="../">Back</a> · <a href="../emit/">Send a file instead</a></p>
+<p class="note"><a href="../" data-i18n="back">Back</a> · <a href="../emit/" data-i18n="sendInstead">Send a file instead</a></p>
 
 <video id="player" playsinline muted class="hidden"></video>
 <canvas id="grabber" class="hidden"></canvas>

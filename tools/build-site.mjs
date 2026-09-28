@@ -24,6 +24,7 @@ const out = resolve(process.argv[2] ?? join(root, 'site'));
 const layout = [
   { from: 'web-shared/index.html', to: 'index.html' },
   { from: 'web-shared/style.css', to: 'shared/style.css' },
+  { from: 'web-shared/i18n.js', to: 'shared/i18n.js' },
   { from: 'web-emitter', to: 'emit' },
   { from: 'web-decoder', to: 'decode' },
   { from: 'wasm/pkg', to: 'photon' },
