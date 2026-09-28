@@ -48,6 +48,7 @@
     <dt data-i18n="factBlocks">Blocks</dt><dd id="fact-blocks">—</dd>
     <dt data-i18n="factRate">Rate</dt><dd id="fact-rate">—</dd>
     <dt data-i18n="factPerCell">Pixels per cell</dt><dd id="fact-percell">—</dd>
+    <dt data-i18n="factTiles">Tiles read</dt><dd id="fact-tiles">—</dd>
     <dt data-i18n="factSpeed">Pictures read</dt><dd id="fact-frames">—</dd>
     <dt data-i18n="factUsed">New codes</dt><dd id="fact-used">—</dd>
     <dt data-i18n="factRepeated">Codes seen again</dt><dd id="fact-repeated">—</dd>
@@ -64,6 +65,12 @@
     <option value="1080" data-i18n="quality1080">1080p — recommended</option>
     <option value="2160" data-i18n="quality2160">4K — sharper, slower</option>
     <option value="720" data-i18n="quality720">720p — for a slow phone</option>
+  </select>
+
+  <label for="speed" data-i18n="speedLabel">Pictures per second</label>
+  <select id="speed">
+    <option value="60" data-i18n="speed60">60 if the camera can, else 30</option>
+    <option value="30" data-i18n="speed30">30</option>
   </select>
 
   <div class="row">

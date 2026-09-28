@@ -16,12 +16,24 @@
 // holds the transfer: which codes have arrived, which blocks they carried, and
 // in the end the file.
 
-import init, { Reader, Receiver, inspectFrame } from '../photon/photon_wasm.js';
+import init, {
+  DenseReader,
+  DenseReceiver,
+  Reader,
+  Receiver,
+  inspectFrame,
+} from '../photon/photon_wasm.js';
 
+// There are two formats, a code of cells and a dense code, and a picture says
+// which it is of. So a reader has a reader of each and the collector a receiver
+// of each, and whichever the pictures turn out to be for does the work.
 let reader = null;
+let denseReader = null;
 let receiver = null;
+let denseReceiver = null;
 let described = false;
 let slowdown = 1;
+let canvas = null;
 
 /** Spends time doing nothing, to stand in for a slower device. */
 function idle(milliseconds) {
@@ -32,17 +44,77 @@ function idle(milliseconds) {
 }
 
 /** Hands the finished file to the page. */
-function deliver() {
-  const name = receiver.fileName();
-  const bytes = receiver.finish();
+function deliver(from) {
+  const name = from.fileName();
+  const bytes = from.finish();
   self.postMessage({ type: 'done', name, bytes: bytes.buffer }, [bytes.buffer]);
   receiver = null;
+  denseReceiver = null;
+}
+
+/**
+ * The pixels of a picture that arrived as a bitmap.
+ *
+ * Copying a picture out of a video is a third of the work of reading it, and
+ * done by the page it is done by the one thread that also has to draw. A bitmap
+ * can be handed over without being copied, and copied out here.
+ */
+function pixelsOf(message) {
+  if (!message.bitmap) return new Uint8Array(message.buffer);
+
+  const { width, height } = message;
+  if (!canvas || canvas.width !== width || canvas.height !== height) {
+    canvas = new OffscreenCanvas(width, height);
+  }
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  context.drawImage(message.bitmap, 0, 0);
+  message.bitmap.close();
+  return new Uint8Array(context.getImageData(0, 0, width, height).data.buffer);
+}
+
+/** Reads one picture as a dense code. Says whether there was one in it. */
+function readDense(message, rgba, began) {
+  const packed = denseReader.read(rgba, message.width, message.height);
+  const summary = JSON.parse(denseReader.summary());
+  if (!summary.located) return false;
+
+  summary.kind = 'dense';
+  summary.outcome = 'opened';
+  if (slowdown > 1) idle((performance.now() - began) * (slowdown - 1));
+  summary.decodeMs = performance.now() - began;
+
+  const reading = packed.buffer;
+  self.postMessage(
+    { type: 'read', id: message.id, summary, reading, dense: true, region: message.region },
+    [reading],
+  );
+  return true;
 }
 
 /** Reads one picture, as far as it is worth reading. */
 function readPicture(message) {
   const began = performance.now();
-  const rgba = new Uint8Array(message.buffer);
+  const rgba = pixelsOf(message);
+
+  if (message.kind !== 'cells') {
+    // Reading takes the pixels with it, so while it is not known which format
+    // the pictures are of, a copy is kept for the other.
+    const spare = message.kind === 'dense' ? null : rgba.slice();
+    if (readDense(message, rgba, began)) return;
+    if (!spare) {
+      const summary = { kind: 'dense', outcome: 'notLocated' };
+      summary.decodeMs = performance.now() - began;
+      self.postMessage({ type: 'read', id: message.id, summary, region: message.region });
+      return;
+    }
+    readCells(message, spare, began);
+    return;
+  }
+  readCells(message, rgba, began);
+}
+
+/** Reads one picture as a code of cells. */
+function readCells(message, rgba, began) {
   const summary = JSON.parse(reader.open(rgba, message.width, message.height));
   let reading = null;
 
@@ -80,18 +152,21 @@ function readPicture(message) {
 
 /** Folds one reading into the transfer. */
 function absorb(message) {
-  const report = JSON.parse(receiver.absorb(new Uint8Array(message.reading)));
+  const into = message.dense ? denseReceiver : receiver;
+  const began = performance.now();
+  const report = JSON.parse(into.absorb(new Uint8Array(message.reading)));
+  report.absorbMs = performance.now() - began;
 
   // The name and size arrive with the first manifest, and the page wants them
   // once.
   if (!described && report.needed > 0) {
-    report.name = receiver.fileName();
-    report.size = receiver.fileSize();
+    report.name = into.fileName();
+    report.size = into.fileSize();
     described = true;
   }
 
   self.postMessage({ type: 'report', id: message.id, report });
-  if (report.complete) deliver();
+  if (report.complete) deliver(into);
 }
 
 self.onmessage = async (event) => {
@@ -106,9 +181,11 @@ self.onmessage = async (event) => {
           // No profile is given, so the receiver works it out from the
           // frames, which say which profile drew them.
           receiver = new Receiver(undefined);
+          denseReceiver = new DenseReceiver();
           described = false;
         } else {
           reader = new Reader();
+          denseReader = new DenseReader();
         }
         self.postMessage({ type: 'ready' });
         break;
@@ -128,7 +205,8 @@ self.onmessage = async (event) => {
         // has is what it has, and the protocol's own message says which stage
         // it fell short at and by how much.
         try {
-          deliver();
+          // Whichever of the two has been told what file this is.
+          deliver(denseReceiver.fileName() === undefined ? receiver : denseReceiver);
         } catch (error) {
           self.postMessage({ type: 'failed', message: String(error) });
         }

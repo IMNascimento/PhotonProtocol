@@ -5,7 +5,7 @@
 // as a device pixel, and a code has to stay on the display long enough for a
 // camera to take a whole picture of it. Everything else here is a form.
 
-import init, { Emitter, profiles } from '../photon/photon_wasm.js';
+import init, { DenseEmitter, Emitter, denseProfiles, profiles } from '../photon/photon_wasm.js';
 import { translator, translatePage } from '../shared/i18n.js';
 
 const t = translator({
@@ -58,6 +58,23 @@ const t = translator({
     en: 'Each code stays up for {ms} ms. A phone takes a picture every 33 ms and needs the code to hold still for a whole one; 10 a second suits most phones, and a fast one keeps up with 15.',
     pt: 'Cada código fica {ms} ms na tela. Um celular tira uma imagem a cada 33 ms e precisa que o código fique parado durante uma inteira; 10 por segundo serve para a maioria, e um celular rápido acompanha 15.',
   },
+  rateNoteDense: {
+    en: 'Each code stays up for {ms} ms. A dense code is read in tiles, and a picture that catches two codes yields the tiles of both, so this can go as fast as the screen refreshes. Lower it if the receiver reads few tiles.',
+    pt: 'Cada código fica {ms} ms na tela. Um código denso é lido em blocos, e uma imagem que pega dois códigos rende os blocos dos dois, então dá para ir tão rápido quanto a tela atualiza. Diminua se o receptor ler poucos blocos.',
+  },
+  denseFacts: {
+    en: '{width}×{height} modules in {tiles} tiles, {bytes} bytes a code, drawn here at {cellPx} pixels a module. Black and white only. Hold the phone on its side, so that the code fills the picture.',
+    pt: '{width}×{height} módulos em {tiles} blocos, {bytes} bytes por código, desenhado aqui com {cellPx} pixels por módulo. Só preto e branco. Segure o celular deitado, para o código ocupar a imagem inteira.',
+  },
+  denseNeeds: {
+    en: ' A camera has to see about 2.7 of its own pixels for each module, so the code must be at least {needed} pixels wide in its picture: {verdict}',
+    pt: ' A câmera precisa enxergar uns 2,7 pixels dela por módulo, então o código tem de ocupar pelo menos {needed} pixels de largura na imagem: {verdict}',
+  },
+  optionDense: { en: '{name} — turbo, {kilobytes} KB a code', pt: '{name} — turbo, {kilobytes} KB por código' },
+  denseStop: {
+    en: 'The code takes the whole screen. Click it, or press Esc, to stop.',
+    pt: 'O código ocupa a tela inteira. Clique nele, ou aperte Esc, para parar.',
+  },
   profileFacts: {
     en: '{grid}×{grid} cells, {bytes} bytes a code, drawn here at {cellPx} pixels a cell.',
     pt: '{grid}×{grid} células, {bytes} bytes por código, desenhado aqui com {cellPx} pixels por célula.',
@@ -98,7 +115,10 @@ const t = translator({
     en: 'The code needs {needed} pixels and only {available} are available. Use a larger window.',
     pt: 'O código precisa de {needed} pixels e só há {available}. Use uma janela maior.',
   },
-  frameFact: { en: '{side}×{side} px, {cellPx} px a cell', pt: '{side}×{side} px, {cellPx} px por célula' },
+  frameFact: {
+    en: '{width}×{height} px, {cellPx} px a cell',
+    pt: '{width}×{height} px, {cellPx} px por célula',
+  },
   passFact: { en: '{frames} codes, {seconds} s', pt: '{frames} códigos, {seconds} s' },
   stage: {
     en: '{name} · code {frame} · pass {pass} · {rate}/s',
@@ -152,6 +172,13 @@ const CAPTURE_LIMIT = 12;
 
 /** How often measurements are sent while capturing. */
 const LOG_INTERVAL_MS = 2000;
+
+/** Codes a second the slider offers, for a code of cells and for a dense one. */
+const CELL_RATE = { min: 4, max: 20, usual: 10 };
+const DENSE_RATE = { min: 10, max: 60, usual: 30 };
+
+/** Device pixels a module of a dense code has to be drawn with. */
+const DENSE_MIN_MODULE_PX = 2;
 
 /** Profile descriptions, as the protocol reports them. */
 let PROFILES = [];
@@ -208,16 +235,24 @@ function cameraPixelsPerCell(profile) {
  * Whole pixels per cell, because the code has to reach the camera as pixels
  * rather than as a resampled approximation of pixels.
  */
-function fitCellSize(grid, box) {
-  const cells = grid + 2 * QUIET_ZONE_CELLS;
+function fitCellSize(profile, box) {
   const ratio = window.devicePixelRatio || 1;
+  if (profile.dense) {
+    // A dense code is the shape of the screen and is given all of it. Nothing
+    // is kept back for a margin: the code has one of its own, and the whole
+    // pixels left over are another.
+    const across = (box.width * ratio) / (profile.width + 2 * profile.quiet);
+    const down = (box.height * ratio) / (profile.height + 2 * profile.quiet);
+    return Math.max(1, Math.floor(Math.min(across, down)));
+  }
+  const cells = profile.grid + 2 * QUIET_ZONE_CELLS;
   const shortest = Math.min(box.width, box.height) * ratio * FIT_MARGIN;
   return Math.max(3, Math.floor(shortest / cells));
 }
 
 /** Whether a profile can be drawn on this screen at a size a camera can read. */
 function fitsOnScreen(profile, box) {
-  return fitCellSize(profile.grid, box) >= profile.minCellPx;
+  return fitCellSize(profile, box) >= profile.minCellPx;
 }
 
 /** The box the code will be drawn into, in CSS pixels. */
@@ -240,6 +275,22 @@ function nextFrame() {
 }
 
 function describeProfile(profile, cellPx) {
+  if (profile.dense) {
+    const facts = t('denseFacts', {
+      width: profile.width,
+      height: profile.height,
+      tiles: profile.tiles,
+      bytes: profile.payloadCapacity,
+      cellPx,
+    });
+    if (cellPx < profile.minCellPx) {
+      return facts + t('profileTooSmall', { cellPx, minimum: profile.minCellPx });
+    }
+    const needed = Math.ceil(((profile.width + 2 * profile.quiet) * 2.7) / 10) * 10;
+    const verdict = needed <= 1150 ? 'verdictAny' : needed <= 1750 ? 'verdictFullHd' : 'verdict4k';
+    return `${facts}${t('denseNeeds', { needed, verdict: t(verdict) })} ${t('denseStop')}`;
+  }
+
   let text = t('profileFacts', {
     grid: profile.grid,
     bytes: profile.payloadCapacity,
@@ -265,23 +316,41 @@ function refreshProfileOptions() {
     if (!option) return;
     if (!fitsOnScreen(profile, box)) option.textContent = t('optionTooDense', { name: profile.name });
     else if (index === 0) option.textContent = t('optionRecommended', { name: profile.name });
-    else option.textContent = profile.name;
+    else if (profile.dense) {
+      option.textContent = t('optionDense', {
+        name: profile.name,
+        kilobytes: (profile.payloadCapacity / 1024).toFixed(1),
+      });
+    } else option.textContent = profile.name;
   });
 }
 
 function refreshProfileNote() {
   const profile = PROFILES[ui.profile.selectedIndex];
   if (!profile) return;
-  const cellPx = fitCellSize(profile.grid, stageBox());
+  const cellPx = fitCellSize(profile, stageBox());
   ui.profileNote.textContent = describeProfile(profile, cellPx);
   ui.profileNote.classList.toggle('bad', cellPx < profile.minCellPx);
-  refreshEstimate();
+
+  // A dense code can change as fast as the screen does; a code of cells has
+  // to hold still for a whole picture.
+  const dense = Boolean(profile.dense);
+  if (dense !== (ui.rate.max === String(DENSE_RATE.max))) {
+    const range = dense ? DENSE_RATE : CELL_RATE;
+    ui.rate.min = String(range.min);
+    ui.rate.max = String(range.max);
+    ui.rate.value = String(range.usual);
+  }
+  refreshRateNote();
 }
 
 function refreshRateNote() {
   const rate = Number(ui.rate.value);
+  const dense = Boolean(PROFILES[ui.profile.selectedIndex]?.dense);
   ui.rateValue.textContent = String(rate);
-  ui.rateNote.textContent = t('rateNote', { ms: Math.round(1000 / rate) });
+  ui.rateNote.textContent = t(dense ? 'rateNoteDense' : 'rateNote', {
+    ms: Math.round(1000 / rate),
+  });
   refreshEstimate();
 }
 
@@ -346,8 +415,9 @@ async function start() {
   await enterFullscreen();
   await nextFrame();
 
+  ui.stage.classList.toggle('dense', Boolean(profile.dense));
   const box = stageBox();
-  const cellPx = fitCellSize(profile.grid, box);
+  const cellPx = fitCellSize(profile, box);
 
   // Refuse rather than paint something unreadable. A code drawn below the floor
   // looks entirely normal on the screen and to the person filming it; the only
@@ -376,7 +446,9 @@ async function start() {
     // Only has to be unlikely to collide with another transfer being filmed
     // nearby; it is not a secret and the protocol does not treat it as one.
     const session = crypto.getRandomValues(new Uint32Array(1))[0];
-    emitter = new Emitter(file.name, buffer, profile.id, cellPx, session);
+    emitter = profile.dense
+      ? new DenseEmitter(file.name, buffer, profile.id, session)
+      : new Emitter(file.name, buffer, profile.id, cellPx, session);
   } catch (error) {
     ui.stage.classList.remove('showing');
     await exitFullscreen();
@@ -385,27 +457,42 @@ async function start() {
   }
 
   const manifest = JSON.parse(emitter.manifest());
-  const side = emitter.side();
+  // What the protocol paints, and what the screen shows: the same for a code
+  // of cells, and for a dense one a pixel to a module scaled up by a whole
+  // number.
+  const painted = profile.dense
+    ? { width: emitter.width(), height: emitter.height() }
+    : { width: emitter.side(), height: emitter.side() };
+  const scale = profile.dense ? cellPx : 1;
+  const width = painted.width * scale;
+  const height = painted.height * scale;
   const refresh = await measureRefresh();
 
-  ui.canvas.width = side;
-  ui.canvas.height = side;
+  ui.canvas.width = width;
+  ui.canvas.height = height;
   // Lay the canvas out so one canvas pixel lands on one device pixel.
-  const cssSide = side / (window.devicePixelRatio || 1);
-  ui.canvas.style.width = `${cssSide}px`;
-  ui.canvas.style.height = `${cssSide}px`;
+  const ratio = window.devicePixelRatio || 1;
+  ui.canvas.style.width = `${width / ratio}px`;
+  ui.canvas.style.height = `${height / ratio}px`;
 
   const context = ui.canvas.getContext('2d', { alpha: false, willReadFrequently: false });
   context.imageSmoothingEnabled = false;
 
+  let small = null;
+  if (profile.dense) {
+    small = document.createElement('canvas');
+    small.width = painted.width;
+    small.height = painted.height;
+  }
+
   // If this ever fails the code is being clipped, which removes the corner
   // patterns and makes the frame unreadable while still looking fine.
-  if (cssSide > box.width + 1 || cssSide > box.height + 1) {
+  if (width / ratio > box.width + 1 || height / ratio > box.height + 1) {
     stop();
     say(
       t('clipped', {
-        needed: Math.ceil(cssSide),
-        available: Math.floor(Math.min(box.width, box.height)),
+        needed: Math.ceil(Math.max(width, height) / ratio),
+        available: Math.floor(width >= height ? box.width : box.height),
       }),
       'bad',
     );
@@ -417,7 +504,11 @@ async function start() {
   running = {
     emitter,
     context,
-    side,
+    painted,
+    small,
+    smallContext: small?.getContext('2d', { alpha: false }) ?? null,
+    width,
+    height,
     cellPx,
     profile,
     name: manifest.name,
@@ -435,7 +526,7 @@ async function start() {
   ui.facts.name.textContent = manifest.name;
   ui.facts.size.textContent = bytes(manifest.originalSize);
   ui.facts.compression.textContent = manifest.compression;
-  ui.facts.frame.textContent = t('frameFact', { side, cellPx });
+  ui.facts.frame.textContent = t('frameFact', { width, height, cellPx });
   ui.facts.pass.textContent = t('passFact', {
     frames: running.perPass,
     seconds: Math.ceil(running.perPass / Number(ui.rate.value)),
@@ -454,7 +545,10 @@ async function start() {
  */
 function holdFor(state) {
   const interval = 1000 / state.refresh;
-  const refreshes = Math.max(2, Math.round(1000 / Number(ui.rate.value) / interval));
+  // A code of cells is read whole or not at all, and a code up for one
+  // refresh is never whole in a picture. A dense code is read in tiles.
+  const fewest = state.profile.dense ? 1 : 2;
+  const refreshes = Math.max(fewest, Math.round(1000 / Number(ui.rate.value) / interval));
   return refreshes * interval;
 }
 
@@ -480,10 +574,16 @@ function paint(now) {
 
   const picture = new ImageData(
     new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength),
-    running.side,
-    running.side,
+    running.painted.width,
+    running.painted.height,
   );
-  running.context.putImageData(picture, 0, 0);
+  if (running.small) {
+    running.smallContext.putImageData(picture, 0, 0);
+    running.context.imageSmoothingEnabled = false;
+    running.context.drawImage(running.small, 0, 0, running.width, running.height);
+  } else {
+    running.context.putImageData(picture, 0, 0);
+  }
 
   const spent = performance.now() - began;
   running.paintMs = running.paintMs === 0 ? spent : running.paintMs * 0.9 + spent * 0.1;
@@ -514,7 +614,10 @@ function paint(now) {
     refresh: Number(running.refresh.toFixed(1)),
     paintMs: Number(running.paintMs.toFixed(1)),
     cellPx: running.cellPx,
-    side: running.side,
+    side: running.width,
+    width: running.width,
+    height: running.height,
+    profile: running.profile.name,
   };
   sendLog(now, rate);
 }
@@ -524,7 +627,12 @@ function sendPainted(state) {
   const query = new URLSearchParams({
     kind: 'sent',
     outcome: `frame${String(state.frames).padStart(3, '0')}`,
-    report: JSON.stringify({ side: state.side, cellPx: state.cellPx, frame: state.frames }),
+    report: JSON.stringify({
+      width: state.width,
+      height: state.height,
+      cellPx: state.cellPx,
+      frame: state.frames,
+    }),
   });
 
   ui.canvas.toBlob((blob) => {
@@ -548,7 +656,8 @@ function sendLog(now, rate) {
       seconds: Number(((now - running.began) / 1000).toFixed(1)),
       profile: running.profile.name,
       cellPx: running.cellPx,
-      side: running.side,
+      side: running.width,
+      height: running.height,
       ratio: window.devicePixelRatio,
       refresh: Number(running.refresh.toFixed(1)),
       perSecond: Number(rate.toFixed(1)),
@@ -624,6 +733,11 @@ ui.file.addEventListener('change', () => {
 });
 ui.start.addEventListener('click', start);
 ui.stop.addEventListener('click', stop);
+// A dense code has the whole screen, and the bar with the button on it is not
+// drawn over it.
+ui.canvas.addEventListener('click', () => {
+  if (running?.profile.dense) stop();
+});
 
 document.addEventListener('fullscreenchange', () => {
   if (!document.fullscreenElement && running) stop();
@@ -641,6 +755,11 @@ try {
   // In order of what a code carries, which is not the order they were
   // numbered in.
   PROFILES = JSON.parse(profiles()).sort((a, b) => a.payloadCapacity - b.payloadCapacity);
+  // The dense profiles after them, because they ask more of whoever is
+  // holding the camera: a phone on its side, close enough to fill its picture.
+  for (const profile of JSON.parse(denseProfiles())) {
+    PROFILES.push({ ...profile, dense: true, minCellPx: DENSE_MIN_MODULE_PX });
+  }
 
   for (let index = 0; index < PROFILES.length; index += 1) {
     ui.profile.append(document.createElement('option'));

@@ -219,6 +219,15 @@ code {
   gap: 1rem;
 }
 
+/* A dense code is the shape of the screen and is given all of it. */
+#stage.dense .overlay {
+  display: none;
+}
+
+#stage.dense #frame {
+  cursor: pointer;
+}
+
 #stage .overlay button {
   padding: 0.2rem 0.7rem;
   font-size: 0.85rem;
