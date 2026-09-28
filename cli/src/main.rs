@@ -10,6 +10,7 @@ mod bench;
 mod decode;
 mod encode;
 mod film;
+mod inspect;
 mod media;
 mod truth;
 
@@ -174,6 +175,16 @@ enum Command {
         y4m: bool,
     },
 
+    /// Say what can be said about pictures nobody has the file for: where the
+    /// grid landed, and how well the calibration ring reads itself.
+    Inspect {
+        /// A picture, or a directory of them.
+        input: PathBuf,
+        /// Write each picture as the decoder saw it into this directory.
+        #[arg(long)]
+        debug_dir: Option<PathBuf>,
+    },
+
     /// Time each stage of reading a picture, on one core.
     Bench {
         /// A directory of pictures.
@@ -299,6 +310,7 @@ fn main() -> ExitCode {
                 y4m,
             })
         })(),
+        Command::Inspect { input, debug_dir } => inspect::run(&input, debug_dir.as_deref()),
         Command::Bench { input, frames } => bench::run(&input, frames),
         Command::Profiles => {
             print_profiles();
