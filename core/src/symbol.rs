@@ -258,6 +258,32 @@ pub struct Classification {
     pub confidence: f32,
 }
 
+/// Numbers in a template: three channels for each sub-cell.
+const TEMPLATE_LEN: usize = SHAPE_SUBCELLS * 3;
+
+/// How far a cell's brightness may stray from its template's before the
+/// difference counts against the match.
+///
+/// A photographed screen is not evenly bright: the lens darkens the corners,
+/// the backlight is uneven, and a screen seen at an angle is brighter at the
+/// near edge. None of that says anything about which symbol a cell holds, so
+/// the match allows each cell a gain of its own. The allowance is bounded
+/// because brightness is sometimes the whole difference between two symbols —
+/// white and grey in the 8-colour palette — and an unbounded gain would make
+/// those identical.
+const GAIN_RANGE: (f32, f32) = (0.6, 1.5);
+
+/// How alike two templates must be, as the cosine of the angle between them,
+/// before only their brightness is taken to tell them apart.
+const SAME_PATTERN: f32 = 0.97;
+
+/// How much of the brightness gap between two such templates a cell's own gain
+/// may cover, as a power of their ratio.
+///
+/// A third each way leaves the middle third between them, which is what keeps
+/// a dim white from being read as a bright grey.
+const GAIN_SHARE: f32 = 0.33;
+
 /// A per-frame classifier, fitted to that frame's calibration ring.
 ///
 /// Fitting per frame rather than per transfer is not an optimisation. Exposure
@@ -265,59 +291,209 @@ pub struct Classification {
 /// fitted to frame 1 is already wrong by frame 40. The calibration ring exists
 /// so that the references and the payload pass through identical optics at an
 /// identical instant.
+///
+/// What is fitted is a whole picture of each symbol — every sub-cell, in colour
+/// — rather than a colour per ink and a shape per mask. The two cannot be
+/// decided apart. Shape is a pattern of *this ink* against black, and an ink is
+/// only as bright as its colour: blue carries a quarter of the luma white does.
+/// Judged by luma, a blue cell's own pattern is fainter than what its bright
+/// neighbours spill into it, and a real camera then reads a quarter of all
+/// blue cells as the wrong shape while reading every green and white one
+/// correctly. Judged in colour, against a template of what that symbol looked
+/// like through this lens a moment ago, the spill from a white neighbour is
+/// simply not blue enough to matter.
 #[derive(Debug, Clone)]
 pub struct Classifier {
     alphabet: Alphabet,
-    /// Measured mean ink colour per colour index.
-    colour_refs: Vec<Rgbf>,
-    /// Measured mean ink luma, used to normalise the shape decision.
-    ink_level: f32,
+    /// What each cell value looks like, black already subtracted, and already
+    /// multiplied by the weights.
+    templates: Vec<[f32; TEMPLATE_LEN]>,
+    /// Weighted squared length of each template.
+    energies: Vec<f32>,
+    /// How much each of the 48 numbers is trusted.
+    weights: [f32; TEMPLATE_LEN],
+    /// The gain a cell is allowed against a template: lowest and highest.
+    gain: (f32, f32),
+    /// What an unpainted sub-cell looks like.
+    black: Rgbf,
 }
+
+/// Cells of one value a refit needs before it will replace that value's
+/// template with what it measured.
+const MIN_REFIT_CELLS: u32 = 12;
 
 impl Classifier {
     /// Fits a classifier to labelled samples, which the caller takes from the
     /// calibration ring (`SPEC.md` §4.2.4).
     ///
-    /// Falls back to the nominal palette for any colour the ring did not
+    /// Falls back to the nominal palette for any symbol the ring did not
     /// exercise. That should not happen for a well-formed frame, but a decoder
     /// working from a partly obscured recording is exactly the case this format
     /// is built for, and losing a whole frame because three cells of the ring
     /// were behind a reflection would be a poor trade.
     #[must_use]
     pub fn fit(alphabet: Alphabet, labelled: &[(u16, CellSample)]) -> Self {
-        let mut sums = vec![Rgbf::ZERO; alphabet.colours.len()];
-        let mut counts = vec![0u32; alphabet.colours.len()];
-        let mut ink_sum = 0.0f32;
-        let mut ink_count = 0u32;
+        let values = alphabet.len();
 
+        // Black first: every template is measured relative to it, so that
+        // stray light lifting the whole frame does not read as ink.
+        let mut black_sum = Rgbf::ZERO;
+        let mut black_count = 0u32;
         for (value, sample) in labelled {
-            let (colour, shape) = alphabet.split(*value);
-            let Some(mask) = alphabet.shapes.get(shape) else { continue };
-            let Some(slot) = sums.get_mut(colour) else { continue };
-            let ink = sample.ink_colour(*mask);
-            *slot = slot.added(ink);
-            counts[colour] += 1;
-            ink_sum += ink.luma();
-            ink_count += 1;
+            let (_, shape) = alphabet.split(*value);
+            let Some(&mask) = alphabet.shapes.get(shape) else { continue };
+            for y in 0..SHAPE_GRID {
+                for x in 0..SHAPE_GRID {
+                    if !mask_bit(mask, y, x) {
+                        black_sum = black_sum.added(sample.sub[(y * SHAPE_GRID + x) as usize]);
+                        black_count += 1;
+                    }
+                }
+            }
+        }
+        // The darkest the unpainted sub-cells get is nearer the truth than
+        // their mean, which includes whatever the painted half spilt into
+        // them. Halving the mean is a cheap stand-in for that.
+        let black =
+            if black_count == 0 { Rgbf::ZERO } else { black_sum.scaled(0.5 / black_count as f32) };
+
+        let mut sums = vec![[0.0f32; TEMPLATE_LEN]; values];
+        let mut counts = vec![0u32; values];
+        for (value, sample) in labelled {
+            let index = usize::from(*value);
+            let Some(slot) = sums.get_mut(index) else { continue };
+            for (sub, colour) in sample.sub.iter().enumerate() {
+                slot[sub * 3] += colour.r - black.r;
+                slot[sub * 3 + 1] += colour.g - black.g;
+                slot[sub * 3 + 2] += colour.b - black.b;
+            }
+            counts[index] += 1;
         }
 
-        let colour_refs =
-            sums.iter()
-                .zip(counts.iter())
-                .enumerate()
-                .map(|(i, (sum, &n))| {
-                    if n == 0 {
-                        Rgbf::from(alphabet.colours[i])
-                    } else {
-                        sum.scaled(1.0 / n as f32)
-                    }
-                })
-                .collect();
+        let templates: Vec<[f32; TEMPLATE_LEN]> = sums
+            .iter()
+            .zip(counts.iter())
+            .enumerate()
+            .map(|(index, (sum, &count))| {
+                if count == 0 {
+                    nominal_template(alphabet, index)
+                } else {
+                    core::array::from_fn(|i| sum[i] / count as f32)
+                }
+            })
+            .collect();
 
-        let ink_level =
-            if ink_count == 0 { 0.5 } else { (ink_sum / ink_count as f32).max(f32::EPSILON) };
+        Self::assemble(alphabet, &templates, [1.0; TEMPLATE_LEN], black)
+    }
 
-        Self { alphabet, colour_refs, ink_level }
+    fn assemble(
+        alphabet: Alphabet,
+        templates: &[[f32; TEMPLATE_LEN]],
+        weights: [f32; TEMPLATE_LEN],
+        black: Rgbf,
+    ) -> Self {
+        let energies = templates
+            .iter()
+            .map(|t| t.iter().zip(weights.iter()).map(|(v, w)| v * v * w).sum::<f32>().max(1e-9))
+            .collect();
+        let weighted =
+            templates.iter().map(|t| core::array::from_fn(|i| t[i] * weights[i])).collect();
+        let gain = gain_range(templates);
+        Self { alphabet, templates: weighted, energies, weights, gain, black }
+    }
+
+    /// Fits again, to the frame's own payload.
+    ///
+    /// The calibration ring is a few hundred cells at the edge of the frame,
+    /// with the timing ring on one side of them and a header band on the other.
+    /// The payload is thousands of cells everywhere else, each surrounded by
+    /// other payload. Through a lens that blurs, a cell's appearance depends on
+    /// its neighbours, so the ring describes cells in a neighbourhood the
+    /// payload does not have.
+    ///
+    /// Once the payload has been read once, most of it is known — nine cells in
+    /// ten even on a capture too poor to decode. Averaging the cells read as
+    /// each value gives templates measured where they will be used, from twenty
+    /// times the evidence. How much the cells of one value differ among
+    /// themselves, number by number, says which parts of a cell to trust: the
+    /// rim, where the neighbours spill in, varies more than the middle and
+    /// counts for less.
+    ///
+    /// `samples` and `calls` are the payload cells and what this classifier
+    /// made of them, in the same order.
+    #[must_use]
+    pub fn refit(&self, samples: &[CellSample], calls: &[Classification]) -> Self {
+        let values = self.alphabet.len();
+        let mut sums = vec![[0.0f64; TEMPLATE_LEN]; values];
+        let mut counts = vec![0u32; values];
+
+        let centred = |sample: &CellSample| -> [f32; TEMPLATE_LEN] {
+            let mut cell = [0.0f32; TEMPLATE_LEN];
+            for (sub, colour) in sample.sub.iter().enumerate() {
+                cell[sub * 3] = colour.r - self.black.r;
+                cell[sub * 3 + 1] = colour.g - self.black.g;
+                cell[sub * 3 + 2] = colour.b - self.black.b;
+            }
+            cell
+        };
+
+        for (sample, call) in samples.iter().zip(calls.iter()) {
+            let Some(slot) = sums.get_mut(usize::from(call.value)) else { continue };
+            for (sum, value) in slot.iter_mut().zip(centred(sample).iter()) {
+                *sum += f64::from(*value);
+            }
+            counts[usize::from(call.value)] += 1;
+        }
+
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a mean of values in [-1, 1] fits an f32"
+        )]
+        let templates: Vec<[f32; TEMPLATE_LEN]> = (0..values)
+            .map(|index| {
+                if counts[index] < MIN_REFIT_CELLS {
+                    // Too few to measure. Keep what the ring said, undoing the
+                    // weights it was stored with.
+                    core::array::from_fn(|i| self.templates[index][i] / self.weights[i].max(1e-9))
+                } else {
+                    core::array::from_fn(|i| (sums[index][i] / f64::from(counts[index])) as f32)
+                }
+            })
+            .collect();
+
+        // Spread of the cells about their own template, pooled over every
+        // value: one number per sub-cell and channel.
+        let mut spread = [0.0f64; TEMPLATE_LEN];
+        let mut measured = 0u64;
+        for (sample, call) in samples.iter().zip(calls.iter()) {
+            let Some(template) = templates.get(usize::from(call.value)) else { continue };
+            for ((slot, value), expected) in
+                spread.iter_mut().zip(centred(sample).iter()).zip(template.iter())
+            {
+                let difference = f64::from(value - expected);
+                *slot += difference * difference;
+            }
+            measured += 1;
+        }
+
+        let mut weights = [1.0f32; TEMPLATE_LEN];
+        if measured > 0 {
+            let mean: f64 = spread.iter().sum::<f64>() / (TEMPLATE_LEN as f64 * measured as f64);
+            // A floor on the spread, so that one number that happens to vary
+            // little cannot be given the whole decision.
+            let floor = (mean * 0.25).max(1e-6);
+            for (weight, total) in weights.iter_mut().zip(spread.iter()) {
+                let variance = (total / measured as f64).max(floor);
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "a ratio of two variances of the same order"
+                )]
+                let value = (mean.max(floor) / variance) as f32;
+                *weight = value;
+            }
+        }
+
+        Self::assemble(self.alphabet, &templates, weights, self.black)
     }
 
     /// The alphabet this classifier was fitted for.
@@ -328,104 +504,137 @@ impl Classifier {
 
     /// Classifies one measured cell.
     ///
-    /// Shape first, then colour. The order matters: knowing the shape says which
-    /// sub-cells hold ink, and averaging only those keeps the black background
-    /// out of the colour estimate. Averaging the whole cell instead would drag
-    /// every colour halfway to black and collapse the white/grey pair, which is
-    /// already the weakest distinction in the 8-colour palette.
+    /// The cell is compared against every symbol's template and the nearest
+    /// wins, with each comparison allowed a gain of its own inside
+    /// [`GAIN_RANGE`].
     #[must_use]
+    #[expect(clippy::suboptimal_flops, reason = "see the note on the inner loop")]
     pub fn classify(&self, sample: &CellSample) -> Classification {
-        let (shape, shape_margin) = self.classify_shape(sample);
-        let mask = self.alphabet.shapes[shape];
-        let (colour, colour_margin) = self.classify_colour(sample, mask);
-
-        Classification {
-            value: self.alphabet.join(colour, shape),
-            // A cell is only as trustworthy as its weaker half.
-            confidence: shape_margin.min(colour_margin),
+        let mut cell = [0.0f32; TEMPLATE_LEN];
+        for (sub, colour) in sample.sub.iter().enumerate() {
+            cell[sub * 3] = colour.r - self.black.r;
+            cell[sub * 3 + 1] = colour.g - self.black.g;
+            cell[sub * 3 + 2] = colour.b - self.black.b;
         }
-    }
-
-    /// Correlates the cell's luma pattern against every mask.
-    ///
-    /// Correlation rather than distance, because the absolute brightness of a
-    /// cell depends on the local illumination, on the ink colour (blue carries
-    /// far less luma than white) and on the camera's exposure, none of which say
-    /// anything about which shape was painted.
-    fn classify_shape(&self, sample: &CellSample) -> (usize, f32) {
-        let lumas = sample.lumas();
-        let mean = lumas.iter().sum::<f32>() / SHAPE_SUBCELLS as f32;
-        let centred: [f32; SHAPE_SUBCELLS] = core::array::from_fn(|i| lumas[i] - mean);
-        let energy = centred.iter().map(|v| v * v).sum::<f32>().sqrt();
-
-        // A flat cell carries no shape information at all. Rather than let
-        // floating-point noise pick a winner, report shape 0 with no confidence
-        // so the cell becomes an erasure candidate.
-        if energy < f32::EPSILON {
-            return (0, 0.0);
-        }
-
-        let mut best = (0usize, f32::NEG_INFINITY);
-        let mut second = f32::NEG_INFINITY;
-
-        for (index, &mask) in self.alphabet.shapes.iter().enumerate() {
-            // Masks are balanced, so the centred template is +/-0.5 everywhere
-            // and its norm is the same for every shape; the correlation is
-            // therefore directly comparable across shapes.
-            let mut score = 0.0f32;
-            for y in 0..SHAPE_GRID {
-                for x in 0..SHAPE_GRID {
-                    let template = if mask_bit(mask, y, x) { 0.5 } else { -0.5 };
-                    score = centred[(y * SHAPE_GRID + x) as usize].mul_add(template, score);
-                }
-            }
-
-            if score > best.1 {
-                second = best.1;
-                best = (index, score);
-            } else if score > second {
-                second = score;
-            }
-        }
-
-        let margin = margin_of(best.1, second, energy);
-        (best.0, margin)
-    }
-
-    /// Nearest measured centroid in raw RGB.
-    ///
-    /// Raw rather than chromaticity-normalised, because white and grey share a
-    /// chromaticity and differ only in luminance (`SPEC.md` Q2). Normalising
-    /// would make them indistinguishable by construction.
-    fn classify_colour(&self, sample: &CellSample, mask: u16) -> (usize, f32) {
-        let ink = sample.ink_colour(mask);
+        let weighted: [f32; TEMPLATE_LEN] =
+            core::array::from_fn(|i| cell[i] * cell[i] * self.weights[i]);
+        let energy = sum_lanes(&weighted);
 
         let mut best = (0usize, f32::INFINITY);
         let mut second = f32::INFINITY;
-        for (index, reference) in self.colour_refs.iter().enumerate() {
-            let d = ink.distance_squared(*reference);
-            if d < best.1 {
+
+        for (index, (template, &template_energy)) in
+            self.templates.iter().zip(self.energies.iter()).enumerate()
+        {
+            // Written out rather than fused: WebAssembly has no fused
+            // multiply-add and emulates one in software, in the one loop of
+            // the decoder that runs a million times a frame.
+            let dot = dot_lanes(&cell, template);
+            let gain = (dot / template_energy).clamp(self.gain.0, self.gain.1);
+            // |cell - gain * template|^2, expanded so the products above are
+            // the only pass over the 48 numbers.
+            let distance = gain * gain * template_energy + energy - 2.0 * gain * dot;
+
+            if distance < best.1 {
                 second = best.1;
-                best = (index, d);
-            } else if d < second {
-                second = d;
+                best = (index, distance);
+            } else if distance < second {
+                second = distance;
             }
         }
 
-        // Distances are squared, so compare in the linear domain; scale by the
-        // measured ink level so the margin means the same thing under any
-        // exposure.
-        let margin = margin_of(second.sqrt(), best.1.sqrt(), self.ink_level);
-        (best.0, margin)
+        // The gap between the two nearest templates, measured against how much
+        // signal the cell held. A flat cell is equally far from everything and
+        // reports no confidence at all.
+        let confidence = if energy <= f32::EPSILON || !second.is_finite() {
+            0.0
+        } else {
+            ((second.max(0.0).sqrt() - best.1.max(0.0).sqrt()) / energy.sqrt()).clamp(0.0, 1.0)
+        };
+
+        Classification { value: u16::try_from(best.0).unwrap_or(0), confidence }
     }
 }
 
-/// Normalises the gap between a winner and a runner-up into `[0, 1]`.
-fn margin_of(best: f32, second: f32, scale: f32) -> f32 {
-    if scale <= f32::EPSILON {
-        return 0.0;
+/// The gain a cell may be given against these templates.
+///
+/// As wide as [`GAIN_RANGE`] when every symbol differs from every other in
+/// pattern or in hue, which is every alphabet built on the 4-colour palette.
+/// Where two differ in brightness alone, the range is drawn in until it covers
+/// only part of the gap between them.
+fn gain_range(templates: &[[f32; TEMPLATE_LEN]]) -> (f32, f32) {
+    let lengths: Vec<f32> = templates.iter().map(|t| dot_lanes(t, t).sqrt()).collect();
+    let mut closest = f32::INFINITY;
+
+    for (i, a) in templates.iter().enumerate() {
+        for (j, b) in templates.iter().enumerate().skip(i + 1) {
+            let (la, lb) = (lengths[i], lengths[j]);
+            if la <= f32::EPSILON || lb <= f32::EPSILON {
+                continue;
+            }
+            if dot_lanes(a, b) / (la * lb) < SAME_PATTERN {
+                continue;
+            }
+            closest = closest.min(la.max(lb) / la.min(lb));
+        }
     }
-    ((best - second) / scale).clamp(0.0, 1.0)
+
+    if !closest.is_finite() {
+        return GAIN_RANGE;
+    }
+    let reach = closest.max(1.0).powf(GAIN_SHARE);
+    ((1.0 / reach).max(GAIN_RANGE.0), reach.min(GAIN_RANGE.1))
+}
+
+/// Lanes the sums below are kept in.
+const LANES: usize = 8;
+
+/// The sum of 48 numbers, kept in eight running totals.
+///
+/// Floating-point addition is not associative, so a compiler may not reorder a
+/// plain running sum and therefore cannot do several additions at once. Eight
+/// totals state the order outright, which lets it.
+#[inline]
+fn sum_lanes(values: &[f32; TEMPLATE_LEN]) -> f32 {
+    let mut lanes = [0.0f32; LANES];
+    for chunk in values.as_chunks::<LANES>().0 {
+        for (lane, value) in lanes.iter_mut().zip(chunk.iter()) {
+            *lane += value;
+        }
+    }
+    lanes.iter().sum()
+}
+
+/// The inner product of two templates' worth of numbers.
+#[inline]
+fn dot_lanes(a: &[f32; TEMPLATE_LEN], b: &[f32; TEMPLATE_LEN]) -> f32 {
+    let mut lanes = [0.0f32; LANES];
+    for (left, right) in a.as_chunks::<LANES>().0.iter().zip(b.as_chunks::<LANES>().0) {
+        for ((lane, p), q) in lanes.iter_mut().zip(left.iter()).zip(right.iter()) {
+            *lane += p * q;
+        }
+    }
+    lanes.iter().sum()
+}
+
+/// What a symbol would look like with no camera in the way.
+fn nominal_template(alphabet: Alphabet, value: usize) -> [f32; TEMPLATE_LEN] {
+    let (colour, shape) = alphabet.split(u16::try_from(value).unwrap_or(0));
+    let ink = alphabet.colours.get(colour).copied().map_or(Rgbf::ZERO, Rgbf::from);
+    let mask = alphabet.shapes.get(shape).copied().unwrap_or(0);
+
+    let mut template = [0.0f32; TEMPLATE_LEN];
+    for y in 0..SHAPE_GRID {
+        for x in 0..SHAPE_GRID {
+            if mask_bit(mask, y, x) {
+                let sub = (y * SHAPE_GRID + x) as usize;
+                template[sub * 3] = ink.r;
+                template[sub * 3 + 1] = ink.g;
+                template[sub * 3 + 2] = ink.b;
+            }
+        }
+    }
+    template
 }
 
 #[cfg(test)]
@@ -570,6 +779,141 @@ mod tests {
         let classifier = Classifier::fit(alphabet, &calibration_for(alphabet));
         let flat = CellSample { sub: [Rgbf::new(0.5, 0.5, 0.5); SHAPE_SUBCELLS] };
         assert!(classifier.classify(&flat).confidence < f32::EPSILON);
+    }
+
+    /// A cell with some of its neighbours' light spilt into it.
+    fn spilt_into(mut sample: CellSample, spill: Rgbf) -> CellSample {
+        for sub in &mut sample.sub {
+            *sub = sub.added(spill);
+        }
+        sample
+    }
+
+    #[test]
+    fn a_dim_ink_beside_bright_neighbours_keeps_its_shape() {
+        // The fault that stopped every real transfer. The palette's blue has a
+        // quarter of the luma its white does, so a blue cell's own pattern is
+        // fainter in luma than what bright neighbours spill into its unpainted
+        // half. Judged by luma a quarter of all blue cells came out as the
+        // wrong shape, which put every frame over what its parity could repair.
+        //
+        // Here white neighbours have spilt three tenths of themselves into the
+        // bottom half of a cell whose top half is blue. By luma the bottom is
+        // now the brighter half: the blue is 0.26, and the spill is 0.30.
+        let alphabet = Alphabet::for_profile(&PROFILES[0]);
+        let classifier = Classifier::fit(alphabet, &calibration_for(alphabet));
+
+        let blue = 2;
+        let top = 0;
+        let value = alphabet.join(blue, top);
+        let mut sample = render_ideal(alphabet, value);
+        for index in SHAPE_SUBCELLS / 2..SHAPE_SUBCELLS {
+            sample.sub[index] = Rgbf::new(0.3, 0.3, 0.3);
+        }
+
+        let lumas = sample.lumas();
+        let upper: f32 = lumas[..SHAPE_SUBCELLS / 2].iter().sum();
+        let lower: f32 = lumas[SHAPE_SUBCELLS / 2..].iter().sum();
+        assert!(lower > upper, "the test does not set up what it claims to");
+
+        assert_eq!(classifier.classify(&sample).value, value);
+    }
+
+    #[test]
+    fn every_symbol_survives_light_spilt_evenly_across_it() {
+        // Stray light inside a lens lifts everything by about the same amount.
+        // It is not ink, and must not be read as any.
+        for profile in &PROFILES[..2] {
+            let alphabet = Alphabet::for_profile(profile);
+            let classifier = Classifier::fit(alphabet, &calibration_for(alphabet));
+            for v in 0..alphabet.len() {
+                let value = u16::try_from(v).unwrap();
+                let sample = spilt_into(render_ideal(alphabet, value), Rgbf::new(0.1, 0.1, 0.1));
+                assert_eq!(
+                    classifier.classify(&sample).value,
+                    value,
+                    "{} value {value}",
+                    profile.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn white_and_grey_are_told_apart_by_brightness_alone() {
+        // The one pair in any palette that differs in nothing else. A cell is
+        // allowed a gain of its own so that uneven lighting costs nothing, and
+        // left unbounded that gain would make these two the same symbol.
+        let alphabet = Alphabet::for_profile(&PROFILES[2]);
+        let classifier = Classifier::fit(alphabet, &calibration_for(alphabet));
+        let (white, grey) = (6, 7);
+
+        for shape in 0..alphabet.shapes.len() {
+            for colour in [white, grey] {
+                let value = alphabet.join(colour, shape);
+                // A tenth dimmer and a tenth brighter than it was painted.
+                for gain in [0.9f32, 1.1] {
+                    let mut sample = render_ideal(alphabet, value);
+                    for sub in &mut sample.sub {
+                        *sub = sub.scaled(gain);
+                    }
+                    assert_eq!(
+                        classifier.classify(&sample).value,
+                        value,
+                        "colour {colour} shape {shape} at gain {gain}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn refitting_to_the_payload_learns_what_the_ring_could_not() {
+        // The ring's cells have the timing ring and a header band for
+        // neighbours; the payload's have each other. Through a lens that
+        // blurs, the same symbol looks different in the two places. Here the
+        // payload's cells all carry a spill the ring's never saw, large enough
+        // that templates from the ring misread some of them.
+        let alphabet = Alphabet::for_profile(&PROFILES[1]);
+        let from_ring = Classifier::fit(alphabet, &calibration_for(alphabet));
+
+        let spill = Rgbf::new(0.30, 0.22, 0.05);
+        let wanted: Vec<u16> =
+            (0..640).map(|i| u16::try_from(i % alphabet.len()).unwrap()).collect();
+        let samples: Vec<CellSample> =
+            wanted.iter().map(|&v| spilt_into(render_ideal(alphabet, v), spill)).collect();
+
+        let wrong = |classifier: &Classifier| {
+            samples
+                .iter()
+                .zip(wanted.iter())
+                .filter(|(sample, want)| classifier.classify(sample).value != **want)
+                .count()
+        };
+
+        let first: Vec<Classification> = samples.iter().map(|s| from_ring.classify(s)).collect();
+        let refitted = from_ring.refit(&samples, &first);
+
+        let before = wrong(&from_ring);
+        let after = wrong(&refitted);
+        assert!(after <= before, "refitting made it worse: {before} wrong became {after}");
+        assert_eq!(after, 0, "refitting left {after} of {} wrong, from {before}", samples.len());
+    }
+
+    #[test]
+    fn refitting_to_too_few_cells_keeps_what_the_ring_said() {
+        // A value the first reading found three times has not been measured.
+        let alphabet = Alphabet::for_profile(&PROFILES[0]);
+        let from_ring = Classifier::fit(alphabet, &calibration_for(alphabet));
+
+        let samples: Vec<CellSample> = (0..3).map(|_| render_ideal(alphabet, 5)).collect();
+        let first: Vec<Classification> = samples.iter().map(|s| from_ring.classify(s)).collect();
+        let refitted = from_ring.refit(&samples, &first);
+
+        for v in 0..alphabet.len() {
+            let value = u16::try_from(v).unwrap();
+            assert_eq!(refitted.classify(&render_ideal(alphabet, value)).value, value);
+        }
     }
 
     #[test]
