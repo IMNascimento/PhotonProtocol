@@ -239,7 +239,7 @@ impl Detector {
 }
 
 /// Finds the four finder centres, in the picture's own coordinates.
-fn locate_corners(gray: &Gray) -> Option<[Point; 4]> {
+pub(crate) fn locate_corners(gray: &Gray) -> Option<[Point; 4]> {
     let pixels = gray.width() as usize * gray.height() as usize;
 
     if pixels > HALVE_ABOVE {
