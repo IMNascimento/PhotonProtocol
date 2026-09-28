@@ -51,7 +51,7 @@ pub mod transport;
 pub use error::{Error, Result};
 pub use frame::{FrameLayout, Region};
 pub use geom::{Homography, Point};
-pub use image::RgbImage;
+pub use image::{Gray, RgbImage};
 pub use profile::{Profile, ProfileId, RsPartition};
 pub use symbol::{Alphabet, CellSample, Classification, Classifier, Rgb, Rgbf};
 

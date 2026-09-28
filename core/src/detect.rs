@@ -25,15 +25,24 @@
 use crate::error::{Error, Result};
 use crate::frame::{FINDER_PATTERN, FrameLayout};
 use crate::geom::{Homography, Point};
-use crate::image::RgbImage;
+use crate::image::{Gray, RgbImage};
 use crate::profile::{PROFILES, ProfileId};
 
-/// Fraction below the local mean at which a pixel counts as dark.
+/// How far below the local mean a pixel must be to count as dark, in eight-bit
+/// levels.
 ///
 /// A margin rather than the mean itself: a flat region of pure white has a mean
 /// equal to itself, and without the margin half of it would threshold as dark
 /// on rounding alone.
-const DARK_MARGIN: f32 = 0.06;
+const DARK_MARGIN: u64 = 15;
+
+/// Pixels above which a picture is searched at half size first.
+///
+/// Finder patterns are the largest things in a frame and survive halving
+/// easily, while the search costs in proportion to the pixels it looks at. A
+/// picture with nothing in it at half size is searched again at full size, so
+/// a small or distant code is found late rather than not at all.
+const HALVE_ABOVE: usize = 1_000_000;
 
 /// Side of the local averaging window, as a fraction of the shorter image edge.
 ///
@@ -78,7 +87,10 @@ const MIN_ORIENTATION_SCORE: f64 = 0.08;
 /// A located frame.
 #[derive(Debug, Clone)]
 pub struct Detection {
-    /// The profile whose geometry fits.
+    /// A profile whose geometry fits.
+    ///
+    /// Geometry is all that finding a frame settles. Profiles that share a grid
+    /// are told apart by the header, which says which of them drew the frame.
     pub profile: ProfileId,
     /// Cell space to image pixels.
     pub transform: Homography,
@@ -160,9 +172,8 @@ impl Detector {
     /// found, and [`Error::NoOrientation`] when they were found but no profile
     /// and rotation produced a transform the alignment marker agrees with.
     pub fn detect(&self, image: &RgbImage) -> Result<Detection> {
-        let binary = Binary::from_image(image);
-        let candidates = find_finders(&binary);
-        let corners = select_quad(&candidates).ok_or(Error::NoFinders)?;
+        let gray = Gray::from_image(image);
+        let corners = locate_corners(&gray).ok_or(Error::NoFinders)?;
 
         let mut best: Option<Detection> = None;
 
@@ -218,13 +229,31 @@ impl Detector {
     /// a preview rather than on every frame.
     #[must_use]
     pub fn diagnose(&self, image: &RgbImage) -> Diagnosis {
-        let binary = Binary::from_image(image);
+        let binary = Binary::from_gray(&Gray::from_image(image));
         let candidates = find_finders(&binary);
         Diagnosis {
             finder_candidates: candidates.len(),
             quad_found: select_quad(&candidates).is_some(),
         }
     }
+}
+
+/// Finds the four finder centres, in the picture's own coordinates.
+fn locate_corners(gray: &Gray) -> Option<[Point; 4]> {
+    let pixels = gray.width() as usize * gray.height() as usize;
+
+    if pixels > HALVE_ABOVE {
+        let half = gray.halved();
+        let candidates = find_finders(&Binary::from_gray(&half));
+        if let Some(corners) = select_quad(&candidates) {
+            // A pixel of the halved picture covers two of the original, so its
+            // centre sits between them.
+            return Some(corners.map(|p| Point::new(p.x * 2.0 + 0.5, p.y * 2.0 + 0.5)));
+        }
+    }
+
+    let candidates = find_finders(&Binary::from_gray(gray));
+    select_quad(&candidates)
 }
 
 /// Rotates a corner list by `steps` positions.
@@ -325,51 +354,51 @@ impl Binary {
     /// A photographed screen is never evenly lit — it is brighter where the lamp
     /// is and darker at the edges — so a single threshold either loses the dark
     /// corner or floods the bright one. The local mean follows the gradient.
-    fn from_image(image: &RgbImage) -> Self {
-        let (width, height) = (image.width(), image.height());
-        let mut luma = vec![0.0f32; (width as usize) * (height as usize)];
+    fn from_gray(gray: &Gray) -> Self {
+        let (width, height) = (gray.width() as usize, gray.height() as usize);
+        let luma = gray.as_raw();
+
+        // Summed-area table, so a window mean is four lookups whatever its
+        // size. Sixty-four bits, because a bright picture of a few megapixels
+        // overflows thirty-two.
+        let (iw, ih) = (width + 1, height + 1);
+        let mut integral = vec![0u64; iw * ih];
         for y in 0..height {
-            for x in 0..width {
-                let value = crate::symbol::Rgbf::from(image.get(x, y)).luma();
-                luma[(y as usize) * (width as usize) + x as usize] = value;
+            let mut row_sum = 0u64;
+            let (above, here) = integral.split_at_mut((y + 1) * iw);
+            let above = &above[y * iw..];
+            let row = &luma[y * width..(y + 1) * width];
+            for (x, &value) in row.iter().enumerate() {
+                row_sum += u64::from(value);
+                here[x + 1] = above[x + 1] + row_sum;
             }
         }
 
-        // Summed-area table, so a window mean is four lookups whatever its size.
-        let (iw, ih) = (width as usize + 1, height as usize + 1);
-        let mut integral = vec![0.0f64; iw * ih];
-        for y in 0..height as usize {
-            let mut row_sum = 0.0f64;
-            for x in 0..width as usize {
-                row_sum += f64::from(luma[y * width as usize + x]);
-                integral[(y + 1) * iw + x + 1] = integral[y * iw + x + 1] + row_sum;
-            }
-        }
-
-        let radius = (width.min(height) / WINDOW_FRACTION).max(4);
-        let mut dark = vec![false; (width as usize) * (height as usize)];
+        let radius = (width.min(height) / WINDOW_FRACTION as usize).max(4);
+        let mut dark = vec![false; width * height];
 
         for y in 0..height {
             let y0 = y.saturating_sub(radius);
             let y1 = (y + radius).min(height - 1);
+            let (top, bottom) = (y0 * iw, (y1 + 1) * iw);
+            let rows = (y1 - y0 + 1) as u64;
+
             for x in 0..width {
                 let x0 = x.saturating_sub(radius);
                 let x1 = (x + radius).min(width - 1);
 
-                let area = f64::from((x1 - x0 + 1) * (y1 - y0 + 1));
-                let sum = integral[(y1 as usize + 1) * iw + x1 as usize + 1]
-                    - integral[(y0 as usize) * iw + x1 as usize + 1]
-                    - integral[(y1 as usize + 1) * iw + x0 as usize]
-                    + integral[(y0 as usize) * iw + x0 as usize];
-                let mean = sum / area;
+                let area = rows * (x1 - x0 + 1) as u64;
+                let sum = integral[bottom + x1 + 1] + integral[top + x0]
+                    - integral[top + x1 + 1]
+                    - integral[bottom + x0];
 
-                let value = f64::from(luma[(y as usize) * (width as usize) + x as usize]);
-                dark[(y as usize) * (width as usize) + x as usize] =
-                    value < mean - f64::from(DARK_MARGIN);
+                // value < mean - margin, without the division.
+                let value = u64::from(luma[y * width + x]);
+                dark[y * width + x] = (value + DARK_MARGIN) * area < sum;
             }
         }
 
-        Self { width, height, dark }
+        Self { width: gray.width(), height: gray.height(), dark }
     }
 
     fn is_dark(&self, x: u32, y: u32) -> bool {
@@ -398,7 +427,20 @@ struct Run {
     len: u32,
 }
 
-/// Whether five consecutive runs have the finder pattern's 1:1:3:1:1 shape.
+/// Whether five consecutive runs are a cut through a finder pattern, and if so
+/// the size of its module.
+///
+/// The pattern is 1:1:3:1:1, but a photograph of it is not. Bright areas spread
+/// into dark ones — more with every stop of overexposure, and a bright screen
+/// in an ordinary room is always somewhat overexposed — so each dark ring comes
+/// out narrower than it was painted and each light ring wider by the same
+/// amount. At five pixels a module the rings of a well-lit finder measure
+/// nearer 0.6:1.4:2.6:1.4:0.6, which a test of the five widths rejects.
+///
+/// What spreading cannot move is the *middle* of a ring: its two edges shift
+/// in opposite directions by the same amount. So the test is on where the
+/// rings are rather than on how wide they look. From the centre of the
+/// pattern, the light rings sit two modules out and the dark rings three.
 fn matches_ratio(runs: &[Run; 5]) -> Option<f64> {
     if !(runs[0].dark && !runs[1].dark && runs[2].dark && !runs[3].dark && runs[4].dark) {
         return None;
@@ -408,16 +450,33 @@ fn matches_ratio(runs: &[Run; 5]) -> Option<f64> {
         return None;
     }
 
-    let module = f64::from(total) / 7.0;
-    let tolerance = module * RATIO_TOLERANCE;
-    let expected = [1.0, 1.0, 3.0, 1.0, 1.0];
-
-    for (run, multiple) in runs.iter().zip(expected.iter()) {
-        let want = module * multiple;
-        if (f64::from(run.len) - want).abs() > tolerance * multiple.max(1.0) {
-            return None;
-        }
+    let middles: [f64; 5] = core::array::from_fn(|i| run_centre(runs[i]));
+    let module = (middles[4] - middles[0]) / 6.0;
+    if module < 1.0 {
+        return None;
     }
+    let tolerance = module * RATIO_TOLERANCE;
+
+    // The light rings, four modules apart.
+    if ((middles[3] - middles[1]) - 4.0 * module).abs() > tolerance {
+        return None;
+    }
+    // Both pairs of rings centred on the middle of the pattern.
+    let centre = middles[2];
+    if (f64::midpoint(middles[0], middles[4]) - centre).abs() > tolerance
+        || (f64::midpoint(middles[1], middles[3]) - centre).abs() > tolerance
+    {
+        return None;
+    }
+
+    // Widths are only asked to be plausible: no ring vanishingly thin or
+    // swollen to twice its size, and a centre that is clearly the widest.
+    let width = |index: usize| f64::from(runs[index].len) / module;
+    let ring = |index: usize| (0.25..=2.0).contains(&width(index));
+    if !(ring(0) && ring(1) && ring(3) && ring(4) && (1.6..=3.9).contains(&width(2))) {
+        return None;
+    }
+
     Some(module)
 }
 
@@ -532,11 +591,15 @@ fn ray_runs(binary: &Binary, from: Point, direction: (f64, f64), limit: u32) -> 
 /// of: half the dark centre, a light ring, a dark ring, then light.
 ///
 /// This is the check that separates a finder from a stripe. A row of alternating
-/// cells in the header band reproduces the 1:1:3:1:1 run lengths along one axis
-/// perfectly well — it simply has no such structure along the diagonals, and a
-/// finder has it along all eight.
+/// cells in the header band reproduces the run lengths along one axis perfectly
+/// well — it simply has no such structure along the diagonals, and a finder has
+/// it along all eight.
+///
+/// As in [`matches_ratio`], the test is on where the middles of the rings fall
+/// and not on how wide the rings look, because only the first survives a
+/// photograph: the light ring two units out and the dark ring three.
 fn ray_matches(binary: &Binary, centre: Point, direction: (f64, f64), module: f64) -> bool {
-    let limit = to_pixel((module * 6.0).ceil()).unwrap_or(0).saturating_add(4);
+    let limit = to_pixel((module * 7.0).ceil()).unwrap_or(0).saturating_add(4);
     let runs = ray_runs(binary, centre, direction, limit);
     if runs.len() < 4 {
         return false;
@@ -545,26 +608,24 @@ fn ray_matches(binary: &Binary, centre: Point, direction: (f64, f64), module: f6
     let (dark_centre, light_ring, dark_ring, beyond) =
         (f64::from(runs[0]), f64::from(runs[1]), f64::from(runs[2]), f64::from(runs[3]));
 
-    // Estimate the module from the ray itself: along a diagonal each step covers
-    // more ground, so an absolute comparison against the horizontal module would
-    // reject every diagonal.
-    let unit = (dark_centre / 1.5 + light_ring + dark_ring) / 3.0;
-    if unit < 1.0 {
-        return false;
-    }
-    let tolerance = unit * 0.35;
-
-    // The centre must be visibly wider than the rings around it. Without this
-    // the check accepts 1:1:1, which is what a field of identical cells looks
-    // like — and a frame whose payload is mostly padding is exactly that over
-    // most of its area, so the clutter would arrive by the thousand.
-    if dark_centre < light_ring * 1.2 || dark_centre < dark_ring * 1.2 {
+    // The module is taken from the ray itself: along a diagonal each ring is
+    // crossed at a slant and is longer, so a comparison against the module
+    // measured along a row would reject every diagonal.
+    let light_at = dark_centre + light_ring / 2.0;
+    let dark_at = dark_centre + light_ring + dark_ring / 2.0;
+    let unit = dark_at / 3.0;
+    if unit < 1.0 || !(0.55..=2.0).contains(&(unit / module)) {
         return false;
     }
 
-    (dark_centre - unit * 1.5).abs() <= tolerance * 1.5
-        && (light_ring - unit).abs() <= tolerance
-        && (dark_ring - unit).abs() <= tolerance
+    (light_at - 2.0 * unit).abs() <= unit * 0.4
+        // A field of identical cells is evenly spaced, and would pass a test of
+        // spacing alone. The middle of a finder is three modules wide, and the
+        // half of it this ray crossed has to be the longest stretch of dark.
+        && dark_centre >= dark_ring * 0.9
+        && dark_centre >= unit * 0.8
+        && (0.25..=2.0).contains(&(light_ring / unit))
+        && (0.25..=2.0).contains(&(dark_ring / unit))
         // The separator, or the quiet zone. A finder is never adjacent to ink.
         && beyond >= unit * 0.4
 }
@@ -577,8 +638,24 @@ fn is_finder(binary: &Binary, centre: Point, module: f64) -> bool {
 }
 
 /// Confirms a horizontal hit by looking for the same ratio down its column.
-fn confirm_vertically(binary: &Binary, x: u32, y: u32) -> Option<(f64, f64)> {
-    let runs = runs_along(binary, x, true);
+///
+/// Only the stretch of the column a finder of this size could occupy is read.
+/// Reading all of it made every hit cost the height of the picture, and a
+/// picture of a code is mostly hits.
+fn confirm_vertically(binary: &Binary, x: u32, y: u32, module: f64) -> Option<(f64, f64)> {
+    let reach = to_pixel((module * 9.0).ceil()).unwrap_or(0).saturating_add(4);
+    let from = y.saturating_sub(reach);
+    let to = y.saturating_add(reach).min(binary.height.saturating_sub(1));
+
+    let mut runs: Vec<Run> = Vec::new();
+    for position in from..=to {
+        let dark = binary.is_dark(x, position);
+        match runs.last_mut() {
+            Some(run) if run.dark == dark => run.len += 1,
+            _ => runs.push(Run { dark, start: position, len: 1 }),
+        }
+    }
+
     for window in runs.windows(5) {
         let five: [Run; 5] = [window[0], window[1], window[2], window[3], window[4]];
         let Some(module) = matches_ratio(&five) else { continue };
@@ -609,7 +686,7 @@ fn find_finders(binary: &Binary) -> Vec<Candidate> {
             let x = run_centre(middle);
 
             let Some(column) = to_pixel(x) else { continue };
-            let Some((cy, vertical_module)) = confirm_vertically(binary, column, y) else {
+            let Some((cy, vertical_module)) = confirm_vertically(binary, column, y, module) else {
                 continue;
             };
 
@@ -839,7 +916,14 @@ mod tests {
                 panic!("{} was not detected: {e}", profile.name);
             });
 
-            assert_eq!(detection.profile, profile.id, "{} matched another profile", profile.name);
+            // Finding a frame settles its geometry and nothing more: two
+            // profiles on one grid look the same until the header is read.
+            assert_eq!(
+                detection.profile.profile().grid,
+                profile.grid,
+                "{} matched another geometry",
+                profile.name
+            );
             let error = worst_error(&layout, &detection.transform, &truth);
 
             // Tight on purpose. A uniform half-pixel bias in the run-centre
@@ -988,6 +1072,31 @@ mod tests {
         assert_eq!(open.profile, restricted.profile);
         let truth = layout.identity_transform(8);
         assert!(worst_error(&layout, &restricted.transform, &truth) < 0.25);
+    }
+
+    #[test]
+    fn a_finder_whose_dark_rings_have_been_eaten_is_still_found() {
+        // A bright screen in an ordinary room is overexposed, and light spreads
+        // into dark. At six pixels a cell the dark rings of a finder come out
+        // little over half as wide as they were painted and the light ones half
+        // as wide again, which is nothing like 1:1:3:1:1. The middles of the
+        // rings stay where they were, and that is what the search goes by.
+        for profile in &PROFILES[..2] {
+            let (layout, image) = painted(profile, 6);
+
+            let mut channel = Channel::pristine();
+            channel.blur_sigma = 1.0;
+            channel.gain = [1.7, 1.7, 1.7];
+            let capture = channel.apply(&image, &layout.identity_transform(6));
+
+            let detection = Detector::new().detect(&capture.image).unwrap_or_else(|e| {
+                panic!("{} overexposed was not detected: {e}", profile.name);
+            });
+            assert_eq!(detection.profile.profile().grid, profile.grid);
+
+            let error = worst_error(&layout, &detection.transform, &capture.transform);
+            assert!(error < 0.35, "{} located {error:.3} cells out", profile.name);
+        }
     }
 
     fn rotate_image(image: &RgbImage, quarter_turns: u32) -> RgbImage {

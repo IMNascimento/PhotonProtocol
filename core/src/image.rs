@@ -8,11 +8,14 @@
 
 use crate::symbol::{Rgb, Rgbf};
 
-/// A tightly packed 8-bit RGB image.
+/// An 8-bit RGB image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RgbImage {
     width: u32,
     height: u32,
+    /// Bytes from one pixel to the next: three, or four when the buffer came
+    /// from a canvas and still carries its alpha.
+    stride: usize,
     data: Vec<u8>,
 }
 
@@ -32,7 +35,7 @@ impl RgbImage {
         for _ in 0..(len / 3) {
             data.extend_from_slice(&[fill.r, fill.g, fill.b]);
         }
-        Self { width, height, data }
+        Self { width, height, stride: 3, data }
     }
 
     /// Wraps an existing tightly packed RGB buffer.
@@ -42,7 +45,28 @@ impl RgbImage {
     #[must_use]
     pub fn from_raw(width: u32, height: u32, data: Vec<u8>) -> Option<Self> {
         let expected = (width as usize).checked_mul(height as usize)?.checked_mul(3)?;
-        (data.len() == expected).then_some(Self { width, height, data })
+        (data.len() == expected).then_some(Self { width, height, stride: 3, data })
+    }
+
+    /// Wraps a buffer of RGBA pixels, as a canvas produces them, without
+    /// copying it.
+    ///
+    /// The alpha is carried and ignored. Dropping it would mean copying every
+    /// pixel of every video frame for the sake of a byte nothing reads, thirty
+    /// times a second, on the device least able to afford it.
+    ///
+    /// Returns `None` if the buffer length does not match the dimensions.
+    #[must_use]
+    pub fn from_rgba(width: u32, height: u32, data: Vec<u8>) -> Option<Self> {
+        let expected = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+        (data.len() == expected).then_some(Self { width, height, stride: 4, data })
+    }
+
+    /// Bytes from one pixel to the next in [`RgbImage::as_raw`]: three, or four
+    /// for an image made by [`RgbImage::from_rgba`].
+    #[must_use]
+    pub const fn stride(&self) -> usize {
+        self.stride
     }
 
     /// Image width in pixels.
@@ -57,7 +81,8 @@ impl RgbImage {
         self.height
     }
 
-    /// The underlying buffer, three bytes per pixel in row-major order.
+    /// The underlying buffer, [`RgbImage::stride`] bytes per pixel in row-major
+    /// order.
     #[must_use]
     pub fn as_raw(&self) -> &[u8] {
         &self.data
@@ -77,7 +102,7 @@ impl RgbImage {
 
     fn offset(&self, x: u32, y: u32) -> Option<usize> {
         (x < self.width && y < self.height)
-            .then(|| (y as usize * self.width as usize + x as usize) * 3)
+            .then(|| (y as usize * self.width as usize + x as usize) * self.stride)
     }
 
     /// The pixel at `(x, y)`, or black outside the image.
@@ -105,6 +130,50 @@ impl RgbImage {
                 self.set(xx, yy, colour);
             }
         }
+    }
+
+    /// Bilinear sample at a continuous pixel coordinate, as three channels in
+    /// `[0, 1]`.
+    ///
+    /// The same measurement as [`RgbImage::sample_bilinear`], written for the
+    /// inner loop of reading a frame: it indexes the buffer directly and uses no
+    /// fused multiply-add, which WebAssembly has no instruction for and
+    /// emulates in software at many times the cost of the arithmetic it
+    /// replaces.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::suboptimal_flops,
+        reason = "coordinates are clamped to the image first; see above for the arithmetic"
+    )]
+    pub fn sample(&self, x: f64, y: f64) -> [f32; 3] {
+        if self.width == 0 || self.height == 0 {
+            return [0.0; 3];
+        }
+        let (w, h) = (self.width as usize, self.height as usize);
+        let x = x.clamp(0.0, (w - 1) as f64);
+        let y = y.clamp(0.0, (h - 1) as f64);
+        let (x0, y0) = (x as usize, y as usize);
+        let (fx, fy) = ((x - x0 as f64) as f32, (y - y0 as f64) as f32);
+        let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+
+        let (top, bottom) = (y0 * w * self.stride, y1 * w * self.stride);
+        let (left, right) = (x0 * self.stride, x1 * self.stride);
+        let data = &self.data;
+
+        let mut out = [0.0f32; 3];
+        for (channel, slot) in out.iter_mut().enumerate() {
+            let p00 = f32::from(data[top + left + channel]);
+            let p10 = f32::from(data[top + right + channel]);
+            let p01 = f32::from(data[bottom + left + channel]);
+            let p11 = f32::from(data[bottom + right + channel]);
+            let upper = p00 + (p10 - p00) * fx;
+            let lower = p01 + (p11 - p01) * fx;
+            *slot = (upper + (lower - upper) * fy) * (1.0 / 255.0);
+        }
+        out
     }
 
     /// Bilinear sample at a continuous pixel coordinate.
@@ -230,5 +299,79 @@ mod tests {
         img.fill_rect(1, 1, 10, 10, Rgb::WHITE);
         assert_eq!(img.get(2, 2), Rgb::WHITE);
         assert_eq!(img.get(0, 0), Rgb::BLACK);
+    }
+}
+
+/// An 8-bit brightness image.
+///
+/// Finding a frame is a question about light and dark. Asking it of three
+/// floating-point channels per pixel, as the first version did, spent most of a
+/// frame's time converting numbers the search then reduced to one bit each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gray {
+    width: u32,
+    height: u32,
+    data: Vec<u8>,
+}
+
+impl Gray {
+    /// The brightness of a colour image, in Rec. 601 weights.
+    #[must_use]
+    pub fn from_image(image: &RgbImage) -> Self {
+        let stride = image.stride();
+        let data = image
+            .as_raw()
+            .chunks_exact(stride)
+            .map(|pixel| {
+                let sum = 77 * u32::from(pixel[0])
+                    + 150 * u32::from(pixel[1])
+                    + 29 * u32::from(pixel[2])
+                    + 128;
+                u8::try_from(sum >> 8).unwrap_or(u8::MAX)
+            })
+            .collect();
+        Self { width: image.width(), height: image.height(), data }
+    }
+
+    /// Width in pixels.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Height in pixels.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// The buffer, one byte per pixel in row-major order.
+    #[must_use]
+    pub fn as_raw(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// The same picture at half the size, each pixel the mean of four.
+    #[must_use]
+    pub fn halved(&self) -> Self {
+        let (width, height) = ((self.width / 2).max(1), (self.height / 2).max(1));
+        let (w, source) = (self.width as usize, &self.data);
+        let mut data = Vec::with_capacity(width as usize * height as usize);
+
+        for y in 0..height as usize {
+            let top = (y * 2).min(self.height as usize - 1) * w;
+            let bottom = (y * 2 + 1).min(self.height as usize - 1) * w;
+            for x in 0..width as usize {
+                let left = (x * 2).min(w - 1);
+                let right = (x * 2 + 1).min(w - 1);
+                let sum = u32::from(source[top + left])
+                    + u32::from(source[top + right])
+                    + u32::from(source[bottom + left])
+                    + u32::from(source[bottom + right])
+                    + 2;
+                data.push(u8::try_from(sum >> 2).unwrap_or(u8::MAX));
+            }
+        }
+        Self { width, height, data }
     }
 }
