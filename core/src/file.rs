@@ -40,6 +40,19 @@ pub const BROTLI_WINDOW: u32 = 22;
 /// (`SPEC.md` §7.2).
 const MIN_COMPRESSION_GAIN: f64 = 0.02;
 
+/// Input above which the search is eased off.
+///
+/// Brotli's hardest setting is several times slower than the one below it for
+/// a percent or two of size. On a small file that is milliseconds; on a large
+/// one it is the sender sitting frozen before the first code goes up.
+const LARGE_INPUT: usize = 512 * 1024;
+
+/// Brotli quality for input above [`LARGE_INPUT`].
+const BROTLI_QUALITY_LARGE: u32 = 9;
+
+/// Bytes in each of the samples used to judge whether input will shrink.
+const PROBE_LEN: usize = 32 * 1024;
+
 /// Compression algorithms (`SPEC.md` §7.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compression {
@@ -103,9 +116,18 @@ pub fn digest(data: &[u8]) -> [u8; 32] {
 /// decompression step and a way to fail.
 #[must_use]
 pub fn compress(data: &[u8]) -> (Compression, Vec<u8>) {
+    // Find out cheaply whether there is anything to gain before spending the
+    // effort. Most of what people send is a photograph, which is compressed
+    // already; searching three megabytes of it as hard as Brotli can takes
+    // many seconds in a browser, with the page frozen, to save nothing.
+    if !looks_compressible(data) {
+        return (Compression::None, data.to_vec());
+    }
+
+    let quality = if data.len() > LARGE_INPUT { BROTLI_QUALITY_LARGE } else { BROTLI_QUALITY };
     let mut out = Vec::new();
     let params = brotli::enc::BrotliEncoderParams {
-        quality: i32::try_from(BROTLI_QUALITY).unwrap_or(11),
+        quality: i32::try_from(quality).unwrap_or(11),
         lgwin: i32::try_from(BROTLI_WINDOW).unwrap_or(22),
         ..Default::default()
     };
@@ -121,6 +143,40 @@ pub fn compress(data: &[u8]) -> (Compression, Vec<u8>) {
     } else {
         (Compression::None, data.to_vec())
     }
+}
+
+/// Whether a quick look says the input will shrink.
+///
+/// Three samples — the start, the middle and the end — compressed at a low
+/// effort. Input that does not shrink at all that way will not shrink enough to
+/// matter any other way, and the samples cost milliseconds.
+fn looks_compressible(data: &[u8]) -> bool {
+    if data.len() <= 3 * PROBE_LEN {
+        return true;
+    }
+
+    let middle = data.len() / 2 - PROBE_LEN / 2;
+    let samples =
+        [&data[..PROBE_LEN], &data[middle..middle + PROBE_LEN], &data[data.len() - PROBE_LEN..]];
+
+    let params = brotli::enc::BrotliEncoderParams {
+        quality: 4,
+        lgwin: i32::try_from(BROTLI_WINDOW).unwrap_or(22),
+        ..Default::default()
+    };
+
+    let mut packed = 0usize;
+    for mut sample in samples {
+        let mut out = Vec::new();
+        if brotli::BrotliCompress(&mut sample, &mut out, &params).is_err() {
+            return true;
+        }
+        packed += out.len();
+    }
+
+    // Generous: the full search finds more than this quick one does, and a
+    // wasted attempt costs time where a missed one costs throughput.
+    (packed as f64) < (3 * PROBE_LEN) as f64 * (1.0 - MIN_COMPRESSION_GAIN / 2.0)
 }
 
 /// Decompresses a payload, refusing to exceed `expected_len`.
@@ -503,6 +559,37 @@ mod tests {
         altered[0] ^= 0x01;
         assert_eq!(manifest.verify(&altered), Err(Error::HashMismatch));
         assert_eq!(manifest.verify(&file[..file.len() - 1]), Err(Error::HashMismatch));
+    }
+
+    #[test]
+    fn a_large_file_that_will_not_shrink_is_not_searched() {
+        // Three megabytes of photograph take Brotli many seconds to find
+        // nothing in, with the sending page frozen. A look at three samples
+        // says the same thing in milliseconds.
+        let mut state = 0x9E37_79B9u32;
+        let data: Vec<u8> = (0..400_000)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                u8::try_from(state >> 24).unwrap_or(0)
+            })
+            .collect();
+
+        assert!(!looks_compressible(&data));
+        let (algorithm, packed) = compress(&data);
+        assert_eq!(algorithm, Compression::None);
+        assert_eq!(packed, data);
+    }
+
+    #[test]
+    fn a_large_file_that_will_shrink_still_does() {
+        let data: Vec<u8> =
+            (0..700_000).map(|i| b"the quick brown fox jumps over "[i % 31]).collect();
+        assert!(looks_compressible(&data));
+
+        let (algorithm, packed) = compress(&data);
+        assert_eq!(algorithm, Compression::Brotli);
+        assert!(packed.len() < data.len() / 20);
+        assert_eq!(decompress(algorithm, &packed, data.len()).unwrap(), data);
     }
 
     fn hex(text: &str) -> Vec<u8> {
