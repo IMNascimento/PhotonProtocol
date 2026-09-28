@@ -3,6 +3,7 @@ const profiles = [
   { id: 0x01, name: 'P1-conservative', g: 96,  shapes: 4, colors: 4, k: 175 },
   { id: 0x02, name: 'P2-standard',     g: 128, shapes: 8, colors: 4, k: 199 },
   { id: 0x03, name: 'P3-dense',        g: 160, shapes: 8, colors: 8, k: 223 },
+  { id: 0x04, name: 'P4-balanced',     g: 128, shapes: 4, colors: 4, k: 175 },
 ];
 
 const rows = [];

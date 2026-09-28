@@ -199,6 +199,8 @@ enum Profile {
     P2,
     /// `P3-dense`.
     P3,
+    /// `P4-balanced`.
+    P4,
 }
 
 impl From<Profile> for ProfileId {
@@ -207,6 +209,7 @@ impl From<Profile> for ProfileId {
             Profile::P1 => Self::P1Conservative,
             Profile::P2 => Self::P2Standard,
             Profile::P3 => Self::P3Dense,
+            Profile::P4 => Self::P4Balanced,
         }
     }
 }

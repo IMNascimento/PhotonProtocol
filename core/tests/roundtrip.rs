@@ -151,7 +151,12 @@ fn an_incompressible_file_survives_a_distorted_channel() {
 #[test]
 fn every_profile_completes_a_transfer_through_the_channel() {
     let file = document(12_000);
-    for profile in [ProfileId::P1Conservative, ProfileId::P2Standard, ProfileId::P3Dense] {
+    for profile in [
+        ProfileId::P1Conservative,
+        ProfileId::P2Standard,
+        ProfileId::P3Dense,
+        ProfileId::P4Balanced,
+    ] {
         let channel = Channel::severity(0.2);
         let (received, _, lost) =
             transfer("shared.txt", &file, profile, &channel, 8, 300, Locate::ByDetection)

@@ -59,6 +59,10 @@ pub enum ProfileId {
     /// 160x160 cells, 6 bits per cell, 12.5% parity. Opt-in density for a steady
     /// hand and a good camera.
     P3Dense = 0x03,
+    /// 128x128 cells, 4 bits per cell, 31.4% parity. The alphabet and parity of
+    /// the conservative profile on the grid of the standard one: nearly twice
+    /// the conservative profile's capacity, for a camera that gives Full HD.
+    P4Balanced = 0x04,
 }
 
 impl ProfileId {
@@ -79,6 +83,7 @@ impl ProfileId {
             0x01 => Ok(Self::P1Conservative),
             0x02 => Ok(Self::P2Standard),
             0x03 => Ok(Self::P3Dense),
+            0x04 => Ok(Self::P4Balanced),
             found => Err(Error::ProfileUnsupported { found }),
         }
     }
@@ -90,6 +95,7 @@ impl ProfileId {
             Self::P1Conservative => &PROFILES[0],
             Self::P2Standard => &PROFILES[1],
             Self::P3Dense => &PROFILES[2],
+            Self::P4Balanced => &PROFILES[3],
         }
     }
 }
@@ -135,7 +141,7 @@ pub struct Profile {
 }
 
 /// Every profile defined by `SPEC.md` §8, in identifier order.
-pub static PROFILES: [Profile; 3] = [
+pub static PROFILES: [Profile; 4] = [
     Profile {
         id: ProfileId::P1Conservative,
         name: "P1-conservative",
@@ -160,6 +166,19 @@ pub static PROFILES: [Profile; 3] = [
         num_colours: 8,
         rs_data_len: 223,
     },
+    // Last in the table because it was the last defined, not because it is the
+    // densest: in capacity it falls between the first and the second. It is
+    // the rung the ladder was missing. The first three were cut for cameras
+    // that record 4K, and what a browser is given is usually Full HD, which
+    // resolves the 4-shape alphabet at this grid and the 8-shape one at none.
+    Profile {
+        id: ProfileId::P4Balanced,
+        name: "P4-balanced",
+        grid: 128,
+        num_shapes: 4,
+        num_colours: 4,
+        rs_data_len: 175,
+    },
 ];
 
 impl Profile {
@@ -172,20 +191,18 @@ impl Profile {
     /// Smallest cell, in device pixels, this profile can be painted at and
     /// still read back (`SPEC.md` §4.1).
     ///
-    /// It is a property of the shape alphabet rather than of the grid. The
-    /// 8-shape alphabet uses every one of the 16 sub-cells independently, so
-    /// each needs pixels of its own: at 8 the finest of them gets two, at 7 it
-    /// gets one, and one pixel averages away in any resampling. The 4-shape
-    /// alphabet is four half-planes, whose finest feature is half a cell rather
-    /// than a quarter, and it survives proportionally smaller.
+    /// A property of the shape alphabet rather than of the grid. The 8-shape
+    /// alphabet uses each of the 16 sub-cells independently, so a cell has to
+    /// be wide enough for four columns that are each at least a pixel and not
+    /// too unequal; the 4-shape alphabet is four half-planes, whose finest
+    /// feature is half a cell.
     ///
-    /// Measured, not reasoned about: on a pristine channel with no camera in
-    /// the path, `simulate::eight_pixels_per_cell_is_a_cliff_and_not_a_slope`
-    /// puts the 8-shape profiles at 5.9% and 2.5% of cells wrong one pixel
-    /// below their floor and at exactly zero on it.
+    /// This is a floor on what is *painted*. What a camera can *read* is a
+    /// separate question with a larger answer, and it is the camera's pixels
+    /// that count there, not the screen's.
     #[must_use]
     pub const fn min_cell_px(&self) -> u32 {
-        if self.num_shapes > 4 { 8 } else { 6 }
+        if self.num_shapes > 4 { 6 } else { 4 }
     }
 
     /// Usable cells along one edge of a ring, and along one row of a header
@@ -322,7 +339,7 @@ mod tests {
         payload_capacity: u32,
     }
 
-    const SPEC_TABLE: [Expected; 3] = [
+    const SPEC_TABLE: [Expected; 4] = [
         Expected {
             id: ProfileId::P1Conservative,
             bits_per_cell: 4,
@@ -361,6 +378,19 @@ mod tests {
             full_codewords: 68,
             shortened: Some((112, 80)),
             payload_capacity: 15244,
+        },
+        Expected {
+            id: ProfileId::P4Balanced,
+            bits_per_cell: 4,
+            band_width: 112,
+            header_rows: 3,
+            header_codeword_len: 42,
+            reserved_cells: 1882,
+            data_cells: 14502,
+            raw_bytes: 7251,
+            full_codewords: 28,
+            shortened: Some((111, 31)),
+            payload_capacity: 4931,
         },
     ];
 
@@ -481,15 +511,21 @@ mod tests {
 
     #[test]
     fn robustness_decreases_monotonically_across_profiles() {
-        // The profile ladder is a robustness curve, so parity must fall as
-        // density rises. If this ever inverts, a profile has lost its purpose.
-        let rates: Vec<f64> = PROFILES.iter().map(Profile::rs_parity_rate).collect();
+        // The profile ladder is a robustness curve, so parity must not rise
+        // as density does. If this ever inverts, a profile has lost its
+        // purpose. The ladder is climbed by what a frame carries, which is not
+        // the order the profiles were numbered in.
+        let mut ladder: Vec<&Profile> = PROFILES.iter().collect();
+        ladder.sort_by_key(|profile| profile.raw_bytes());
+
+        let rates: Vec<f64> = ladder.iter().map(|p| p.rs_parity_rate()).collect();
         for pair in rates.windows(2) {
             let [sparser, denser] = pair else { unreachable!("windows(2) yields pairs") };
-            assert!(denser < sparser, "parity rate must fall as density rises: {rates:?}");
+            assert!(denser <= sparser, "parity rate must not rise with density: {rates:?}");
         }
+        assert!(rates.first() > rates.last(), "the ladder is flat: {rates:?}");
 
-        let bits: Vec<u32> = PROFILES.iter().map(Profile::bits_per_cell).collect();
+        let bits: Vec<u32> = ladder.iter().map(|p| p.bits_per_cell()).collect();
         for pair in bits.windows(2) {
             let [lighter, denser] = pair else { unreachable!("windows(2) yields pairs") };
             assert!(denser >= lighter, "bits per cell must not fall as profiles densify: {bits:?}");

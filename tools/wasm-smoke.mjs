@@ -41,7 +41,7 @@ check(photon.protocolVersion() === 1, 'protocol version is 1');
 check(typeof photon.specVersion() === 'string', 'specification version is a string');
 
 const profiles = JSON.parse(photon.profiles());
-check(Array.isArray(profiles) && profiles.length === 3, 'three profiles are described');
+check(Array.isArray(profiles) && profiles.length === 4, 'four profiles are described');
 check(
   profiles.every((p) => p.grid > 0 && p.payloadCapacity > 0 && p.bitsPerCell >= 4),
   'every profile carries usable geometry',
