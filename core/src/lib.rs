@@ -43,6 +43,7 @@ pub mod frame;
 pub mod geom;
 pub mod image;
 pub mod profile;
+pub mod register;
 pub mod session;
 pub mod simulate;
 pub mod symbol;
@@ -53,6 +54,7 @@ pub use frame::{FrameLayout, Region};
 pub use geom::{Homography, Point};
 pub use image::{Gray, RgbImage};
 pub use profile::{Profile, ProfileId, RsPartition};
+pub use register::{CellMap, Mesh};
 pub use symbol::{Alphabet, CellSample, Classification, Classifier, Rgb, Rgbf};
 
 /// Value of the `protocol_version` header field this crate implements.

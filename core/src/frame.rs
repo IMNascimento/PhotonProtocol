@@ -17,6 +17,7 @@
 
 use crate::image::RgbImage;
 use crate::profile::Profile;
+use crate::register::{CellMap, Mesh};
 use crate::symbol::{Alphabet, CellSample, Rgb, Rgbf, SHAPE_GRID, mask_bit};
 use crate::{Homography, Point};
 
@@ -300,7 +301,7 @@ impl FrameLayout {
         }
     }
 
-    /// Measures one cell through a homography mapping cell space to pixels.
+    /// Measures one cell through a map from cell space to pixels.
     ///
     /// Cell space places the code area over `[0, G] x [0, G]`, so the quiet zone
     /// sits at negative coordinates. Each of the 16 sub-cells is averaged from a
@@ -309,44 +310,72 @@ impl FrameLayout {
     /// sub-cell out, which is the error the shape alphabet was chosen to
     /// tolerate rather than one it should be handed.
     #[must_use]
-    pub fn sample_cell(&self, image: &RgbImage, transform: &Homography, cell: u32) -> CellSample {
+    pub fn sample_cell<M: CellMap + ?Sized>(
+        &self,
+        image: &RgbImage,
+        map: &M,
+        cell: u32,
+    ) -> CellSample {
         let (row, col) = self.coordinates(cell);
-        let mut sample = CellSample::zeroed();
-        let step = 1.0 / f64::from(SHAPE_GRID);
+        let origin = Point::new(f64::from(col), f64::from(row));
+        let corner = |dx: f64, dy: f64| map.locate(Point::new(origin.x + dx, origin.y + dy));
 
-        for y in 0..SHAPE_GRID {
-            for x in 0..SHAPE_GRID {
-                let mut sum = Rgbf::ZERO;
-                let mut taps = 0.0f32;
-                for (dy, dx) in [(0.25, 0.25), (0.25, 0.75), (0.75, 0.25), (0.75, 0.75)] {
-                    let u = f64::from(col) + (f64::from(x) + dx) * step;
-                    let v = f64::from(row) + (f64::from(y) + dy) * step;
-                    if let Some(p) = transform.map(Point::new(u, v)) {
-                        let c = image.sample_bilinear(p.x, p.y);
-                        sum = Rgbf::new(sum.r + c.r, sum.g + c.g, sum.b + c.b);
-                        taps += 1.0;
-                    }
-                }
-                if taps > 0.0 {
-                    sample.sub[(y * SHAPE_GRID + x) as usize] =
-                        Rgbf::new(sum.r / taps, sum.g / taps, sum.b / taps);
-                }
+        let corners = [corner(0.0, 0.0), corner(1.0, 0.0), corner(0.0, 1.0), corner(1.0, 1.0)];
+        match corners {
+            [Some(top_left), Some(top_right), Some(bottom_left), Some(bottom_right)] => {
+                sample_quad(image, [top_left, top_right, bottom_left, bottom_right])
             }
+            _ => CellSample::zeroed(),
         }
+    }
 
-        sample
+    /// Measures one cell of a fitted grid.
+    ///
+    /// The same measurement as [`FrameLayout::sample_cell`], reading the cell's
+    /// corners from the mesh instead of computing them.
+    #[must_use]
+    pub fn sample_cell_in(&self, image: &RgbImage, mesh: &Mesh, cell: u32) -> CellSample {
+        let (row, col) = self.coordinates(cell);
+        sample_quad(image, mesh.corners(row, col))
     }
 
     /// Mean colour of a cell, for the regions painted as one solid block.
     #[must_use]
-    pub fn sample_cell_mean(&self, image: &RgbImage, transform: &Homography, cell: u32) -> Rgbf {
-        let sample = self.sample_cell(image, transform, cell);
+    pub fn sample_cell_mean<M: CellMap + ?Sized>(
+        &self,
+        image: &RgbImage,
+        map: &M,
+        cell: u32,
+    ) -> Rgbf {
+        let sample = self.sample_cell(image, map, cell);
         let mut sum = Rgbf::ZERO;
         for sub in &sample.sub {
             sum = Rgbf::new(sum.r + sub.r, sum.g + sub.g, sum.b + sub.b);
         }
         let n = sample.sub.len() as f32;
         Rgbf::new(sum.r / n, sum.g / n, sum.b / n)
+    }
+
+    /// Colour at the middle of a cell of a fitted grid, for the regions painted
+    /// as one solid block.
+    ///
+    /// The middle rather than the whole: the rim of a cell is where its
+    /// neighbours spill into it and where a grid that is slightly out lands on
+    /// the wrong cell, and a solid cell has nothing at its rim that its middle
+    /// does not.
+    #[must_use]
+    pub fn sample_cell_core(&self, image: &RgbImage, mesh: &Mesh, cell: u32) -> Rgbf {
+        let (row, col) = self.coordinates(cell);
+        let corners = mesh.corners(row, col);
+        let mut sum = [0.0f32; 3];
+        for (fx, fy) in [(0.35, 0.35), (0.65, 0.35), (0.35, 0.65), (0.65, 0.65), (0.5, 0.5)] {
+            let (x, y) = within(&corners, fx, fy);
+            let c = image.sample(x, y);
+            sum[0] += c[0];
+            sum[1] += c[1];
+            sum[2] += c[2];
+        }
+        Rgbf::new(sum[0] / 5.0, sum[1] / 5.0, sum[2] / 5.0)
     }
 
     /// Redraws the code area as the decoder sees it, one cell at a fixed size.
@@ -365,7 +394,12 @@ impl FrameLayout {
         clippy::cast_sign_loss,
         reason = "channels are clamped to [0, 1] immediately before scaling to a byte"
     )]
-    pub fn rectify(&self, image: &RgbImage, transform: &Homography, cell_px: u32) -> RgbImage {
+    pub fn rectify<M: CellMap + ?Sized>(
+        &self,
+        image: &RgbImage,
+        transform: &M,
+        cell_px: u32,
+    ) -> RgbImage {
         let grid = self.grid();
         let mut out = RgbImage::filled(grid * cell_px, grid * cell_px, Rgb::BLACK);
         let sub_px = (cell_px / SHAPE_GRID).max(1);
@@ -441,6 +475,155 @@ impl FrameLayout {
         let grid = f64::from(self.grid());
         let offset = grid - 12.0 + f64::from(ORIENTATION_TAG) / 2.0;
         Point::new(offset, offset)
+    }
+}
+
+/// The point a fraction `(fx, fy)` of the way across a cell, given its corners
+/// top-left, top-right, bottom-left, bottom-right.
+fn within(corners: &[Point; 4], fx: f64, fy: f64) -> (f64, f64) {
+    let [top_left, top_right, bottom_left, bottom_right] = corners;
+    let along = |from: &Point, to: &Point, t: f64| {
+        (from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t)
+    };
+    let top = along(top_left, top_right, fx);
+    let bottom = along(bottom_left, bottom_right, fx);
+    (top.0 + (bottom.0 - top.0) * fy, top.1 + (bottom.1 - top.1) * fy)
+}
+
+/// Samples across a cell, each way: two to a sub-cell.
+const TAPS: u32 = SHAPE_GRID * 2;
+
+/// One, in the sixteen-bit fixed point the sampler works in.
+const FIXED_ONE: f64 = 65536.0;
+
+/// Measures the sixteen sub-cells of the cell whose corners are given.
+///
+/// A cell is small enough that the map across it is as good as linear, so the
+/// sample positions are interpolated from its corners rather than each being
+/// sent through the map. That is what makes reading a frame affordable on a
+/// phone: there are some six hundred thousand of these positions in a frame.
+fn sample_quad(image: &RgbImage, corners: [Point; 4]) -> CellSample {
+    let step = 1.0 / f64::from(TAPS);
+
+    // The whole cell inside the picture, with a pixel to spare for the
+    // interpolation: the ordinary case, and the one worth being quick about.
+    let limit = Point::new(f64::from(image.width()) - 1.0, f64::from(image.height()) - 1.0);
+    let inside = corners.iter().all(|corner| {
+        corner.x >= 0.0 && corner.y >= 0.0 && corner.x < limit.x && corner.y < limit.y
+    });
+
+    let mut sums = [[0u32; 3]; (SHAPE_GRID * SHAPE_GRID) as usize];
+
+    if inside {
+        sample_inside(image, &corners, &mut sums);
+    } else {
+        for ty in 0..TAPS {
+            let fy = (f64::from(ty) + 0.5) * step;
+            for tx in 0..TAPS {
+                let fx = (f64::from(tx) + 0.5) * step;
+                let (x, y) = within(&corners, fx, fy);
+                let colour = image.sample(x, y);
+                let slot = &mut sums[((ty / 2) * SHAPE_GRID + tx / 2) as usize];
+                for (total, value) in slot.iter_mut().zip(colour.iter()) {
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "a channel in [0, 1] scaled to the fixed-point range below"
+                    )]
+                    let scaled = (f64::from(*value) * 255.0 * FIXED_ONE) as u32;
+                    *total += scaled >> 2;
+                }
+            }
+        }
+    }
+
+    // Four taps to a sub-cell, each already divided by four, in sixteen-bit
+    // fixed point over an eight-bit channel.
+    let scale = 1.0 / (255.0 * 65536.0);
+    let mut sample = CellSample::zeroed();
+    for (sub, sum) in sample.sub.iter_mut().zip(sums.iter()) {
+        *sub = Rgbf::new(sum[0] as f32 * scale, sum[1] as f32 * scale, sum[2] as f32 * scale);
+    }
+    sample
+}
+
+/// A position in the picture, in sixteen-bit fixed point.
+#[derive(Clone, Copy)]
+struct Fixed {
+    x: i64,
+    y: i64,
+}
+
+impl Fixed {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a position inside a picture, which is far inside what 47 bits hold"
+    )]
+    fn from_point(point: Point) -> Self {
+        Self { x: (point.x * FIXED_ONE) as i64, y: (point.y * FIXED_ONE) as i64 }
+    }
+
+    /// A `count`th of the way from here to `other`.
+    const fn step_to(self, other: Self, count: i64) -> Self {
+        Self { x: (other.x - self.x) / count, y: (other.y - self.y) / count }
+    }
+
+    /// This position moved `steps` and a half steps of `step`.
+    const fn advanced(self, step: Self, steps: i64) -> Self {
+        Self { x: self.x + step.x * steps + step.x / 2, y: self.y + step.y * steps + step.y / 2 }
+    }
+}
+
+/// The inner loop of reading a frame, for a cell known to lie inside the
+/// picture.
+///
+/// In integers throughout. The positions are walked in sixteen-bit fixed point
+/// and each tap is interpolated with eight-bit weights, which is more precision
+/// than an eight-bit picture holds and several times quicker than the same
+/// arithmetic in floating point — most of all in WebAssembly.
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "every position was checked to lie inside the picture before this is called"
+)]
+fn sample_inside(image: &RgbImage, corners: &[Point; 4], sums: &mut [[u32; 3]; 16]) {
+    let taps = i64::from(TAPS);
+    let [top_left, top_right, bottom_left, bottom_right] = corners.map(Fixed::from_point);
+
+    let data = image.as_raw();
+    let stride = image.stride();
+    let row_bytes = image.width() as usize * stride;
+
+    // Down the left and right sides of the cell, a tap's height at a time.
+    let down_left = top_left.step_to(bottom_left, taps);
+    let down_right = top_right.step_to(bottom_right, taps);
+
+    for ty in 0..TAPS {
+        // Half a tap in, so the taps sit at the middles of their squares.
+        let start = top_left.advanced(down_left, i64::from(ty));
+        let end = top_right.advanced(down_right, i64::from(ty));
+        let across = start.step_to(end, taps);
+
+        for tx in 0..TAPS {
+            let at = start.advanced(across, i64::from(tx));
+            let (column, row) = ((at.x.max(0) >> 16) as usize, (at.y.max(0) >> 16) as usize);
+            let (fx, fy) = (((at.x.max(0) >> 8) & 0xFF) as u32, ((at.y.max(0) >> 8) & 0xFF) as u32);
+
+            let top = row * row_bytes + column * stride;
+            let bottom = top + row_bytes;
+            let slot = &mut sums[((ty / 2) * SHAPE_GRID + tx / 2) as usize];
+
+            let weights = [(256 - fx) * (256 - fy), fx * (256 - fy), (256 - fx) * fy, fx * fy];
+
+            for (channel, total) in slot.iter_mut().enumerate() {
+                let value = u32::from(data[top + channel]) * weights[0]
+                    + u32::from(data[top + stride + channel]) * weights[1]
+                    + u32::from(data[bottom + channel]) * weights[2]
+                    + u32::from(data[bottom + stride + channel]) * weights[3];
+                // `value` is the channel in sixteen-bit fixed point; a quarter
+                // of it, because four taps make a sub-cell.
+                *total += value >> 2;
+            }
+        }
     }
 }
 
