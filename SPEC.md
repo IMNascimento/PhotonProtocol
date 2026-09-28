@@ -1,6 +1,6 @@
 # PhotonProtocol — Specification
 
-**Version:** 0.2 (draft)
+**Version:** 0.3 (draft)
 **Status:** DRAFT. The wire format is unstable until this document is tagged `1.0`.
 Implementations built against a draft MUST NOT be assumed interoperable with
 any other draft.
@@ -561,6 +561,33 @@ classification confidence MAY declare low-confidence cells as **erasures** and
 use erasure decoding, which doubles the correction capacity. Doing so is
 RECOMMENDED.
 
+#### 5.2.4 Whitening
+
+The interleaved stream is XORed with a fixed sequence before it is painted, and
+XORed with it again after it is read and before it is de-interleaved. The
+sequence is a 32-bit xorshift started at `0x5048544E`, the frame magic read as
+a big-endian integer. For each byte of the stream, in order:
+
+```
+state ^= state << 13
+state ^= state >> 17
+state ^= state << 5        all three on 32 bits, discarding overflow
+byte  ^= state >> 24
+```
+
+The first eight bytes of the sequence are `02 FC 36 D8 64 66 97 E0`.
+
+A file that compresses well ends in a frame that is mostly padding, and a file
+of zeros is nothing else. Such a frame is one cell repeated: it has no white in
+it, few edges and one ink. A decoder that measures a frame by what is in it —
+black and white from the darkest and brightest cells of a neighbourhood, the
+grid from the edges between cells, an ink from the cells painted in it — has
+nothing to measure. Whitened, every frame has every symbol in it about equally
+often, whatever it carries.
+
+Draft 0.2 did not whiten. Frames painted to it are not read by a decoder of
+this draft, and the reverse.
+
 ### 5.3 Payload units
 
 After RS decoding and de-interleaving, the payload is a byte stream of
@@ -1006,6 +1033,11 @@ where it should, so there is nothing at the perimeter to measure.
 profiles do not decode. A measurement inside the code is needed, whether from
 marks placed there or from the payload itself. See `docs/phase-2-report.md`.
 
+*Draft 0.3:* both. For the frames of §4 the reference decoder now measures the
+grid from the edges of the cells themselves, which reads 15 of 33 pictures of
+`P4-balanced` that an iPhone took and no earlier decoder read. The dense
+frames of §13 have a mark in every tile.
+
 **Q5 — Erasure signalling.** Erasure decoding roughly doubles RS correction
 capacity, and §5.2.3 permits it, but the format gives the decoder no help in
 deciding which cells are unreliable. A per-frame quality region, or a
@@ -1035,6 +1067,9 @@ change holds most of one frame and most of another — but not while every
 codeword is interleaved across the whole frame. Codewords kept within bands of
 the frame would let a decoder keep the bands that were whole.
 
+*Draft 0.3:* the dense frames of §13 are cut into tiles for this reason, and
+go further: a picture of two codes yields the tiles of both.
+
 **Q7 — Symbol ordering across passes.** §6 requires source symbols first and
 distinct ESIs afterwards, but does not specify the repair schedule. If a receiver
 films a random 30-second window, the ideal schedule spreads coverage evenly over
@@ -1043,7 +1078,163 @@ requirement.
 
 ---
 
-## 13. References
+## 13. Dense frames
+
+**Experimental.** Everything in this section has been read through a simulated
+camera and through the real pages in a real browser with simulated footage as
+their camera. It has not yet been read through a real phone. It may change
+without notice, and nothing in §4 to §8 depends on it.
+
+A dense frame is a second physical and link layer under the same transport and
+session layers (§6, §7). It exists because of three things a real phone showed
+of the frames of §4:
+
+- A camera resolves brightness far better than colour. Through an iPhone an
+  edge between black and white is a pixel and a half wide, and a colour bleeds
+  across four. A cell that spends its area on a colour spends it on what the
+  camera sees worst.
+- A picture is rarely of one code. A shutter rolls across the picture while
+  the display repaints, so a picture taken as the code changes holds some of
+  one code and some of the next, and with one set of codewords across the
+  frame it is worth nothing.
+- A lens bends the middle of a code, not its edges, so a grid measured at the
+  perimeter says nothing of the middle (Q4).
+
+### 13.1 Geometry
+
+A dense frame is a rectangle of `W x H` **modules**, each black or white,
+inside a white margin 4 modules wide. It is cut into `Tc x Tr` **tiles** of
+`Tw x Th` modules, so `W = Tc * Tw` and `H = Tr * Th`. Module `(0, 0)` is the
+top-left; module `(x, y)` covers `[x, x + 1) x [y, y + 1)`.
+
+| profile | id | `W x H` | `Tw x Th` | `Tc x Tr` | parity | symbol | a frame carries |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `D1-swift` | `0x11` | 360 x 192 | 72 x 48 | 5 x 4 | 32 | 336 B | 5040 B |
+| `D2-rapid` | `0x12` | 450 x 240 | 75 x 48 | 6 x 5 | 32 | 352 B | 8800 B |
+| `D3-blaze` | `0x13` | 600 x 336 | 75 x 48 | 8 x 7 | 32 | 352 B | 17952 B |
+
+All three are the shape of a 16:9 screen, near enough, and are painted at 5, 4
+and 3 device pixels to a module on one of 1920 x 1080. An emitter MUST paint a
+whole number of device pixels to a module and MUST NOT paint fewer than 2.
+
+**Finder patterns.** The pattern of §4.2.1 at three modules to each of its
+cells, 21 modules square, in each corner of the frame against its outer edges.
+The 24 x 24 modules of each corner are reserved: the pattern, and a white
+separator 3 modules wide on its two inner sides. There is no orientation tag.
+
+**Alignment marks.** Every tile has one. With `cx = Tw div 2` and
+`cy = Th div 2`, the mark of the tile whose top-left module is `(x0, y0)` is
+the 8 x 8 modules from `(x0 + cx - 4, y0 + cy - 4)`, of which the middle
+4 x 4 are its core. In the tiles of rows `r` with `2r < Tr` the core is black
+and the rest white. In the others the core is white and the rest black, which
+is what says which way up a frame is: turned half round, it has four finder
+patterns and a mark in every tile as before, and its black-cored marks at the
+bottom.
+
+Every other module carries data.
+
+### 13.2 A tile
+
+The data modules of a tile are taken in row-major order of the frame, top row
+first and left to right within a row. There are `n` of them, and they carry
+`raw = n div 8` bytes, the first bit of the first byte in the first module,
+most significant bit first. A set bit is a white module. The `n mod 8` modules
+left over are white.
+
+The `raw` bytes are `c = ceil(raw / 255)` Reed-Solomon codewords (§5.2.1), of
+which the first `raw mod c` have `raw div c + 1` bytes and the rest
+`raw div c`, each with the profile's parity. They are interleaved as in §5.2.3
+and whitened as in §5.2.4, but with the sequence started at
+
+```
+0x5048544E xor ((t + 1) * 0x9E3779B9 mod 2^32)
+```
+
+for tile `t`, counting tiles in row-major order from 0, so that two tiles that
+carry the same bytes are not painted alike.
+
+| profile | modules of a tile | codewords | carries | a corner tile | codewords | carries |
+| --- | --- | --- | --- | --- | --- | --- |
+| `D1-swift` | 3392 | 2 x `RS(212,180)` | 360 B | 2816 | 2 x `RS(176,144)` | 288 B |
+| `D2-rapid`, `D3-blaze` | 3536 | 2 x `RS(221,189)` | 378 B | 2960 | 2 x `RS(185,153)` | 306 B |
+
+What a tile carries, all of it, is one record. Multi-byte integers are
+little-endian.
+
+| offset | size | field | |
+| --- | --- | --- | --- |
+| 0 | 1 | `kind` | 0 nothing, 1 the manifest (§7.1), 2 an encoding symbol |
+| 1 | 1 | `profile_id` | |
+| 2 | 4 | `session_id` | as §5.1 |
+| 6 | 4 | `code` | which frame of the transfer this tile is from, counting from 0 |
+| 10 | 1 | `tile` | which tile of the frame, in row-major order |
+| 11 | 2 | `length` | of the body |
+| 13 | `length` | body | |
+| | | zeros | to four bytes short of what the tile carries |
+| last 4 | 4 | `crc32c` | of everything before it |
+
+The body of a symbol is the 4-byte payload identifier of §6 followed by one
+encoding symbol, whose size is the largest multiple of 8 that fits an ordinary
+tile: `floor((carries - 17 - 4) / 8) * 8`.
+
+A dense frame has no header. A picture that spans a change of code has tiles
+of two codes in it, and none of them is wrong; so each tile says which code it
+is from, and a decoder MUST NOT assume that the tiles of a picture agree.
+
+A decoder MUST discard a tile whose checksum fails, whose `profile_id` is not
+the profile it was read as, or whose `tile` is not where it was read from.
+
+### 13.3 What a frame carries
+
+The four corner tiles carry the manifest. So does tile `(11 * code) mod
+(Tc * Tr)`, when it is not a corner: the corners of a picture are where a lens
+is at its worst, and a receiver with every symbol and no manifest has nothing.
+Every other tile carries a symbol: the source symbols first, in order, and
+then repair symbols without end, as in §6.
+
+### 13.4 Display timing
+
+A dense frame MAY be shown for a single refresh of the display. §4.7 asks a
+frame of cells to be held for a whole picture because it is read whole or not
+at all. A dense frame is read tile by tile, and what a camera catches of two
+codes at once a decoder can take apart (§13.5).
+
+### 13.5 Reading
+
+Not normative. This is what the reference decoder was found to need.
+
+- *The grid from inside the code.* The four finder patterns fix a homography.
+  The marks are then found by laying their shape over the picture: those
+  nearest the corners first, each looked for where the ones already found say
+  it will be, and scored by how much lighter its border is than its core
+  **less how far either is from being one shade**, without which a square that
+  happens to be lighter at its edge is found in any data. Between the marks
+  the phase of the modules' own edges gives the rest, to a small fraction of a
+  module. At the four finder patterns nothing is left over, and the grid is
+  pinned there.
+- *In light.* Modules are sampled as light, the camera's numbers raised to the
+  power 2.2, because a lens adds the light of neighbouring modules and a
+  display changing from one code to the next adds the light of both.
+- *Black and white by neighbourhood.* A real camera puts black near a fifth of
+  white and not at the same place across the picture.
+- *The channel taken out.* At three camera pixels to a module a lone white
+  module among black ones is grey. What the lens and sensor did is measured
+  for each tile as nine taps, by least squares against what the tile's
+  modules are first taken to be, and each module is then decided with its
+  neighbours' light removed. Without this `D3-blaze` does not read at all at
+  2.5 camera pixels to a module.
+- *The doubtful bytes as erasures.* The bytes nearest to grey are offered to
+  Reed-Solomon as erasures, and the tile's checksum says whether that was
+  right.
+- *A known code taken out of a picture of two.* Once a tile is read, what it
+  painted is known exactly. It is fitted to what was seen and subtracted, and
+  what is left is read as a tile of another code. A receiver keeps what was
+  seen of the tiles that would not read, and does the same to them when a
+  picture before or after has yielded the code that was in them.
+
+---
+
+## 14. References
 
 - RFC 2119 — Key words for use in RFCs to Indicate Requirement Levels
 - RFC 6330 — RaptorQ Forward Error Correction Scheme for Object Delivery

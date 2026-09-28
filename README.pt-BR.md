@@ -59,7 +59,7 @@ rascunhos não são interoperáveis entre si.
 | 2 | CLI de bancada, câmera simulada, testes de ponta a ponta no navegador | concluída contra uma câmera **simulada**; a real é o próximo passo |
 | 3 | Página emissora | concluída |
 | 4 | Página receptora, lendo ao vivo da câmera | concluída |
-| 5 | Otimização, guiada por medições | em andamento |
+| 5 | Otimização, guiada por medições | em andamento: um formato denso, simulado, em `experiment/throughput` |
 
 **Num celular de verdade.** Um iPhone no Safari, apontado à mão para um monitor
 1080p, recebeu uma imagem de 818 KB com `P1-conservative` a 23,7 KB/s com dez
@@ -88,6 +88,29 @@ modelo entorta a imagem menos do que uma lente de verdade.
 De ponta a ponta, pela página receptora no Chrome desacelerado a um quarto da
 velocidade do desktop para fazer as vezes de um celular, uma foto de 2,7 MB
 chegou em 107 segundos com o resumo conferido.
+
+**O formato denso.** A branch `experiment/throughput` traz um segundo formato,
+feito do que o celular mostrou: só preto e branco, no formato da tela, lido em
+blocos — de modo que uma imagem tirada no meio da troca de código ainda rende o
+que pegou — e com uma marca em cada bloco para medir a grade. Está em
+[`SPEC.md`](SPEC.md) §13 e em
+[`docs/phase-3-report.md`](docs/phase-3-report.md).
+
+| Perfil | Um quadro carrega | Câmera | Códigos por segundo | Taxa, **simulada** |
+| --- | --- | --- | --- | --- |
+| `D1-swift` | 5040 B | 1080p ou 720p, celular deitado | 30 | 150 KB/s |
+| `D2-rapid` | 8800 B | 1080p, celular deitado | 30 a 60 | 260 a 510 KB/s |
+| `D3-blaze` | 17952 B | 1080p, celular deitado, de perto | 30 a 60 | 360 a 890 KB/s |
+
+Pela câmera simulada, um mebibyte chega em 2,14 segundos com a câmera tirando
+trinta imagens por segundo e em 1,15 com sessenta, e pela página receptora no
+Chrome em 2,2.
+O [Decimen](https://github.com/bashalarmistalt/decimen-optical-transfer), cujo
+recorde esta branch se propôs a bater, levou um de um monitor para um celular
+em 2,45. Aquilo é um monitor de verdade e um celular de verdade, e nenhum
+código denso passou por nenhum dos dois ainda: veja em
+[`docs/benchmarks`](docs/benchmarks/README.md) por que os dois números ainda
+não são uma comparação.
 
 [`docs/phase-2-report.md`](docs/phase-2-report.md) traz as medições e o que
 elas mudaram. Em resumo: o primeiro decodificador nunca leu uma captura real, a

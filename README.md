@@ -57,7 +57,7 @@ drafts are not interoperable with each other.
 | 2 | Bench command line, simulated camera, end-to-end browser tests | done against a **simulated** camera; a real one is next |
 | 3 | Sender page | done |
 | 4 | Receiver page, reading live from the camera | done |
-| 5 | Optimisation, driven by measurements | under way |
+| 5 | Optimisation, driven by measurements | under way: a dense format, simulated, on `experiment/throughput` |
 
 **On a real phone.** An iPhone in Safari, pointed by hand at a 1080p monitor,
 received an 818 KB picture with `P1-conservative` at 23.7 KB/s with ten codes
@@ -86,6 +86,28 @@ picture less than a real lens does.
 End to end, through the receiving page in Chrome slowed to a quarter of desktop
 speed to stand in for a phone, a 2.7 MB photograph arrived in 107 seconds with
 its digest verified.
+
+**The dense format.** The branch `experiment/throughput` has a second format,
+made of what the phone showed: black and white only, the shape of the screen,
+read in tiles so that a picture taken as the code changes still yields what it
+caught, with a mark in every tile to measure the grid by. It is
+[`SPEC.md`](SPEC.md) §13 and
+[`docs/phase-3-report.md`](docs/phase-3-report.md).
+
+| Profile | A frame carries | Camera | Codes a second | Throughput, **simulated** |
+| --- | --- | --- | --- | --- |
+| `D1-swift` | 5040 B | 1080p or 720p, on its side | 30 | 150 KB/s |
+| `D2-rapid` | 8800 B | 1080p, on its side | 30 to 60 | 260 to 510 KB/s |
+| `D3-blaze` | 17952 B | 1080p, on its side, close | 30 to 60 | 360 to 890 KB/s |
+
+Through the simulated camera a mebibyte arrives in 2.14 seconds with a camera
+taking thirty pictures a second and in 1.15 with one taking sixty, and through
+the receiving page in Chrome in 2.2.
+[Decimen](https://github.com/bashalarmistalt/decimen-optical-transfer), whose
+record this branch set out to beat, moved one between a monitor and a phone in
+2.45. That is a real monitor and a real phone, and no dense code has been
+through either yet: see [`docs/benchmarks`](docs/benchmarks/README.md) for why
+the two figures are not yet a comparison.
 
 [`docs/phase-2-report.md`](docs/phase-2-report.md) has the measurements and
 what they changed. The short version: the first decoder never decoded a real
@@ -208,6 +230,10 @@ node tools/e2e/matrix.mjs photo.jpg
 # The real receiving page, in Chrome, with simulated footage as its camera.
 target/release/photon film photo.jpg --out filmed --y4m --no-png --seconds 12 --hold 6
 node tools/e2e/receive.mjs filmed/camera.y4m photo.jpg --throttle 4
+
+# The same with a dense code, changing thirty times a second.
+target/release/photon film photo.jpg --out dense --profile d3 --hold 2 --fill 0.88 --y4m --no-png --seconds 8
+node tools/e2e/receive.mjs dense/camera.y4m photo.jpg
 
 # The real sending page, photographed pixel for pixel and decoded.
 node tools/e2e/send.mjs photo.jpg sent

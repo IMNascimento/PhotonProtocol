@@ -1466,6 +1466,14 @@ fn read_payload_through(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_whitening_sequence_is_the_one_the_specification_gives() {
+        // SPEC.md §5.2.4. Whitening nothing gives the sequence itself.
+        let mut bytes = [0u8; 8];
+        whiten(&mut bytes);
+        assert_eq!(bytes, [0x02, 0xFC, 0x36, 0xD8, 0x64, 0x66, 0x97, 0xE0]);
+    }
     use crate::profile::PROFILES;
 
     fn sample_file(len: usize) -> Vec<u8> {

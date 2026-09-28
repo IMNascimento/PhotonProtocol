@@ -23,6 +23,46 @@ simulated camera and do not yet decode through the real one.
 `docs/phase-2-report.md` has the measurements and `docs/benchmarks` the
 figures to beat.
 
+### The dense format, on `experiment/throughput`
+
+A second format, for the camera there is rather than the one the first format
+hoped for: black and white, the shape of the screen, read in tiles.
+`SPEC.md` §13, and `docs/phase-3-report.md` for how it came about.
+
+**Simulated, and not yet tried on a phone.** Through the simulated camera a
+mebibyte that will not compress arrives in 2.14 s with a camera taking thirty
+pictures a second, which is 479 KB/s, and in 1.15 s with one taking sixty,
+which is 888 KB/s. Through the receiving page in Chrome, with the first of
+those as its camera, in 2.2 s. The model has flattered before.
+
+- `photon_core::dense`: the profiles `D1-swift`, `D2-rapid` and `D3-blaze`,
+  carrying 5040, 8800 and 17952 bytes a frame; a transmitter, a reader that
+  keeps nothing, and a receiver.
+- The light of each module's neighbours is taken out of it, by a channel
+  measured for each tile. Without it `D3-blaze` reads nothing at 2.5 camera
+  pixels to a module.
+- A code that is known is taken out of a picture that has two in it, and what
+  is left is read. So a picture taken as the code changes yields both, and the
+  codes can change as fast as the display refreshes.
+- `photon film --profile d1|d2|d3`, and `photon decode`, `bench` and
+  `profiles` for dense codes. `tools/e2e/matrix.mjs` has rows for them.
+- Both pages. The sending page paints a dense code at a whole number of pixels
+  to a module with the screen to itself. The receiving page tells which format
+  it is looking at from the picture, asks the camera for sixty pictures a
+  second and settles for thirty, and has pictures copied out of the video by
+  the workers that read them rather than by the page.
+
+### Changed, on `experiment/throughput`
+
+- **Frames are whitened** (`SPEC.md` §5.2.4), which changes what is painted.
+  Frames of draft 0.2 are not read by this decoder, and the reverse.
+  `photon --unwhitened` reads and paints them as they were.
+- `SPEC.md` is draft 0.3.
+- The grid of a frame of cells is measured from the edges of the cells
+  themselves, its alphabet from its payload, and its black and white by
+  neighbourhood. Of 33 pictures of `P4-balanced` that an iPhone took and no
+  decoder read, 15 now read.
+
 ### Fixed
 
 - **No real capture ever decoded, and this is why.** The classifier decided a
