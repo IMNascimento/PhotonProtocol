@@ -239,6 +239,10 @@ try {
         `\nPASSED  ${received.name}, ${bytes.length} bytes, digest matches, ` +
           `${outcome.seconds.toFixed(1)} s, ${rate.toFixed(1)} KB/s`,
       );
+      // This script looks once a second, which is a long time in a transfer
+      // of four. The page timed it itself, from the first block it was given.
+      const said = await page.evaluate(() => document.getElementById('status')?.textContent ?? '');
+      console.log(`        the page says: ${said}`);
       verdict = 0;
     } else {
       console.log(`\nFAILED  the page offered ${bytes.length} bytes that are not the file that was sent`);

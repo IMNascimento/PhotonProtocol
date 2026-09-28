@@ -99,14 +99,15 @@ try {
 
   await page.evaluate(
     (rate, profile) => {
-      const slider = document.getElementById('rate');
-      slider.value = String(rate);
-      slider.dispatchEvent(new Event('input'));
+      // The profile first: choosing one sets the rate to what suits it.
       if (profile !== null) {
         const select = document.getElementById('profile');
         select.selectedIndex = profile;
         select.dispatchEvent(new Event('change'));
       }
+      const slider = document.getElementById('rate');
+      slider.value = String(rate);
+      slider.dispatchEvent(new Event('input'));
     },
     options.rate,
     options.profile,
@@ -136,7 +137,10 @@ try {
   const stats = await page.evaluate(() => window.photonStats);
   const status = await page.evaluate(() => document.getElementById('status').textContent);
 
-  console.log(`code            ${stats.side}x${stats.side} px, ${stats.cellPx} px a cell`);
+  console.log(
+    `code            ${stats.width ?? stats.side}x${stats.height ?? stats.side} px, ` +
+      `${stats.cellPx} px a cell`,
+  );
   console.log(`display         ${stats.refresh} Hz, as the page measured it`);
   console.log(`codes           ${stats.perSecond} a second, asked for ${options.rate}`);
   console.log(`painting        ${stats.paintMs} ms a code`);
