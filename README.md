@@ -41,6 +41,92 @@ sufficiently large subset of which reconstructs the whole. Film for as long as
 it takes. Frames lost to blur, glare or a shaky hand cost time, never
 correctness.
 
+## Benchmarks
+
+Three kinds of figure, and they are kept apart because they are not worth the
+same. [`docs/benchmarks`](docs/benchmarks/README.md) has all of them in full.
+
+**Measured between two real devices.** An iPhone on iOS 18.7, in Safari, held
+by hand in front of a 1080p monitor. An 818 KB picture, digest verified.
+
+| Profile | Codes shown a second | Pictures read a second | Throughput |
+| --- | --- | --- | --- |
+| `P1-conservative` | 10 | 29 | **23.7 KB/s** |
+| `P1-conservative` | 20 | 30 | **38.2 KB/s** |
+| `P4-balanced`, `P2-standard`, `P3-dense` | 10 | 25 | code found, nothing decoded |
+
+**Simulated, this branch.** `photon film`, a model of a phone camera in front
+of a monitor, and the real pages in Chrome with its footage as their camera.
+
+| Profile | Camera | Codes a second | Throughput |
+| --- | --- | --- | --- |
+| `P1-conservative` | 1080p, 720p from close up | 10 to 20 | 25 to 48 KB/s |
+| `P4-balanced` | 1080p, from close up | 10 to 15 | 48 to 72 KB/s |
+| `P2-standard` | 4K | 10 | 71 KB/s |
+| `P3-dense` | 4K | 10 | 154 KB/s |
+
+Reading a picture takes 15 ms on a desktop core, and took 50.
+
+**Simulated, and on a branch.**
+[`experiment/throughput`](https://github.com/IMNascimento/PhotonProtocol/tree/experiment/throughput)
+has a second format made of what the phone showed: black and white only, the
+shape of the screen, read in tiles, so that a picture taken as the code changes
+still yields what it caught.
+
+| Profile | A frame carries | Camera | Codes a second | Throughput |
+| --- | --- | --- | --- | --- |
+| `D1-swift` | 5040 B | 1080p, on its side | 30 | 150 KB/s |
+| `D2-rapid` | 8800 B | 1080p, on its side | 30 to 60 | 260 to 510 KB/s |
+| `D3-blaze` | 17952 B | 1080p, on its side, close | 30 to 60 | 360 to 960 KB/s |
+
+| A mebibyte that will not compress | Time | Throughput |
+| --- | --- | --- |
+| [Decimen](https://github.com/bashalarmistalt/decimen-optical-transfer), a 49-inch monitor to an iPhone 17 Pro Max, **real** | 2.45 s | 418.5 KB/s |
+| `D3-blaze`, simulated camera at 30 pictures a second | 2.14 s | 479 KB/s |
+| `D3-blaze`, simulated camera at 60 pictures a second | 1.15 s | 888 KB/s |
+| `D3-blaze`, the receiving page in Chrome, simulated camera at 30 | 2.2 s | 465 KB/s |
+| `D3-blaze`, a real monitor to a real phone | | not yet measured |
+
+Decimen's record is what that branch set out to beat, and the table does not
+say it has. Theirs is two devices in a room. Ours is a model, and the model has
+flattered before: it said the three denser profiles above read, and the phone
+read none of them. The last row is the one that counts, and it is empty.
+
+## How large a file
+
+As large as there is time and memory for. The format itself stops nowhere
+near: a file is cut into blocks of RaptorQ symbols, and 200 MB is 11 blocks of
+the symbols a dense frame carries.
+
+**Time** is the file divided by the throughput, and a little more.
+
+| | 1 MB | 20 MB | 200 MB |
+| --- | --- | --- | --- |
+| at 38 KB/s, which a phone has done | 27 s | 9 min | 90 min |
+| at 480 KB/s, simulated | 2 s | 43 s | 7 min |
+| at 890 KB/s, simulated | 1 s | 23 s | 4 min |
+
+**Memory** is what decides whether a large file arrives at all. Measured with
+bytes that will not compress, through the WebAssembly the pages run, in Node,
+with no camera in between: every frame that was painted was read.
+
+| File | Format | Preparing to send | Sender's memory | Receiver's memory | |
+| --- | --- | --- | --- | --- | --- |
+| 20 MB | `P1-conservative` | 1.2 s | 151 MB | 87 MB | same bytes |
+| 20 MB | `D3-blaze`, on the branch | 1.7 s | 168 MB | 104 MB | same bytes |
+| 50 MB | `D3-blaze` | 4.6 s | 350 MB | 244 MB | same bytes |
+| 200 MB | `D3-blaze` | 14 s | 1252 MB | 1010 MB | same bytes, 11126 frames |
+
+The sender needs six to eight times the file and the receiver about five, and
+the page holds the file once more on either side to hand it over.
+
+So 200 MB goes through, given a gigabyte and a quarter to send it from and a
+gigabyte to receive it in. A desktop has that. A phone's browser gives a page
+less than the phone has, and how much less has not been measured: **a file of
+200 MB has not been received by a phone, and may well not fit in one.** Both
+halves hold the file several times over, which they need not, and that is what
+has to change before a phone is asked for files of this size.
+
 ## Status
 
 **Try it: [imnascimento.github.io/PhotonProtocol](https://imnascimento.github.io/PhotonProtocol/)**
@@ -57,7 +143,7 @@ drafts are not interoperable with each other.
 | 2 | Bench command line, simulated camera, end-to-end browser tests | done against a **simulated** camera; a real one is next |
 | 3 | Sender page | done |
 | 4 | Receiver page, reading live from the camera | done |
-| 5 | Optimisation, driven by measurements | under way |
+| 5 | Optimisation, driven by measurements | under way, on [`experiment/throughput`](https://github.com/IMNascimento/PhotonProtocol/tree/experiment/throughput) |
 
 **On a real phone.** An iPhone in Safari, pointed by hand at a 1080p monitor,
 received an 818 KB picture with `P1-conservative` at 23.7 KB/s with ten codes

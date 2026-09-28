@@ -43,6 +43,95 @@ subconjunto grande o bastante reconstrói o todo. Filme pelo tempo que precisar.
 Quadros perdidos por borrão, reflexo ou mão trêmula custam tempo, nunca
 correção.
 
+## Benchmarks
+
+Três tipos de número, mantidos separados porque não valem a mesma coisa.
+[`docs/benchmarks`](docs/benchmarks/README.md) traz todos por extenso.
+
+**Medido entre dois aparelhos de verdade.** Um iPhone com iOS 18.7, no Safari,
+segurado à mão diante de um monitor 1080p. Uma imagem de 818 KB, com o resumo
+conferido.
+
+| Perfil | Códigos por segundo na tela | Imagens lidas por segundo | Taxa |
+| --- | --- | --- | --- |
+| `P1-conservative` | 10 | 29 | **23,7 KB/s** |
+| `P1-conservative` | 20 | 30 | **38,2 KB/s** |
+| `P4-balanced`, `P2-standard`, `P3-dense` | 10 | 25 | código encontrado, nada decodificado |
+
+**Simulado, nesta branch.** O `photon film`, um modelo de câmera de celular
+diante de um monitor, e as páginas de verdade no Chrome com essa filmagem no
+lugar da câmera.
+
+| Perfil | Câmera | Códigos por segundo | Taxa |
+| --- | --- | --- | --- |
+| `P1-conservative` | 1080p, ou 720p de perto | 10 a 20 | 25 a 48 KB/s |
+| `P4-balanced` | 1080p, de perto | 10 a 15 | 48 a 72 KB/s |
+| `P2-standard` | 4K | 10 | 71 KB/s |
+| `P3-dense` | 4K | 10 | 154 KB/s |
+
+Ler uma imagem leva 15 ms num núcleo de desktop; levava 50.
+
+**Simulado, e numa branch.** A
+[`experiment/throughput`](https://github.com/IMNascimento/PhotonProtocol/tree/experiment/throughput)
+traz um segundo formato, feito do que o celular mostrou: só preto e branco, no
+formato da tela, lido em blocos, de modo que uma imagem tirada no meio da troca
+de código ainda rende o que pegou.
+
+| Perfil | Um quadro carrega | Câmera | Códigos por segundo | Taxa |
+| --- | --- | --- | --- | --- |
+| `D1-swift` | 5040 B | 1080p, celular deitado | 30 | 150 KB/s |
+| `D2-rapid` | 8800 B | 1080p, celular deitado | 30 a 60 | 260 a 510 KB/s |
+| `D3-blaze` | 17952 B | 1080p, celular deitado, de perto | 30 a 60 | 360 a 960 KB/s |
+
+| Um mebibyte que não comprime | Tempo | Taxa |
+| --- | --- | --- |
+| [Decimen](https://github.com/bashalarmistalt/decimen-optical-transfer), de um monitor de 49 polegadas para um iPhone 17 Pro Max, **real** | 2,45 s | 418,5 KB/s |
+| `D3-blaze`, câmera simulada a 30 imagens por segundo | 2,14 s | 479 KB/s |
+| `D3-blaze`, câmera simulada a 60 imagens por segundo | 1,15 s | 888 KB/s |
+| `D3-blaze`, a página receptora no Chrome, câmera simulada a 30 | 2,2 s | 465 KB/s |
+| `D3-blaze`, de um monitor de verdade para um celular de verdade | | ainda não medido |
+
+O recorde do Decimen é o que aquela branch se propôs a bater, e a tabela não
+diz que bateu. O deles são dois aparelhos numa sala. O nosso é um modelo, e o
+modelo já favoreceu a gente antes: disse que os três perfis mais densos acima
+liam, e o celular não leu nenhum. A última linha é a que conta, e está vazia.
+
+## Que tamanho de arquivo
+
+O tamanho para o qual houver tempo e memória. O formato em si não para nem
+perto: um arquivo é cortado em blocos de símbolos RaptorQ, e 200 MB são 11
+blocos dos símbolos que um quadro denso carrega.
+
+**O tempo** é o arquivo dividido pela taxa, e um pouco mais.
+
+| | 1 MB | 20 MB | 200 MB |
+| --- | --- | --- | --- |
+| a 38 KB/s, que um celular já fez | 27 s | 9 min | 90 min |
+| a 480 KB/s, simulado | 2 s | 43 s | 7 min |
+| a 890 KB/s, simulado | 1 s | 23 s | 4 min |
+
+**A memória** é o que decide se um arquivo grande chega. Medido com bytes que
+não comprimem, pelo WebAssembly que as páginas rodam, no Node, sem câmera no
+meio: todo quadro desenhado foi lido.
+
+| Arquivo | Formato | Preparar o envio | Memória de quem envia | Memória de quem recebe | |
+| --- | --- | --- | --- | --- | --- |
+| 20 MB | `P1-conservative` | 1,2 s | 151 MB | 87 MB | mesmos bytes |
+| 20 MB | `D3-blaze`, na branch | 1,7 s | 168 MB | 104 MB | mesmos bytes |
+| 50 MB | `D3-blaze` | 4,6 s | 350 MB | 244 MB | mesmos bytes |
+| 200 MB | `D3-blaze` | 14 s | 1252 MB | 1010 MB | mesmos bytes, 11126 quadros |
+
+Quem envia precisa de seis a oito vezes o arquivo e quem recebe de umas cinco,
+e a página guarda o arquivo mais uma vez de cada lado para entregá-lo.
+
+Então 200 MB passam, havendo um gigabyte e um quarto de onde enviar e um
+gigabyte onde receber. Um desktop tem isso. O navegador de um celular dá a uma
+página menos do que o celular tem, e quanto menos não foi medido: **um arquivo
+de 200 MB ainda não foi recebido por um celular, e é bem possível que não caiba
+em um.** As duas metades guardam o arquivo várias vezes, o que não
+precisariam, e é isso que tem de mudar antes de pedir a um celular arquivos
+desse tamanho.
+
 ## Situação atual
 
 **Teste agora: [imnascimento.github.io/PhotonProtocol](https://imnascimento.github.io/PhotonProtocol/)**
@@ -59,7 +148,7 @@ rascunhos não são interoperáveis entre si.
 | 2 | CLI de bancada, câmera simulada, testes de ponta a ponta no navegador | concluída contra uma câmera **simulada**; a real é o próximo passo |
 | 3 | Página emissora | concluída |
 | 4 | Página receptora, lendo ao vivo da câmera | concluída |
-| 5 | Otimização, guiada por medições | em andamento |
+| 5 | Otimização, guiada por medições | em andamento, em [`experiment/throughput`](https://github.com/IMNascimento/PhotonProtocol/tree/experiment/throughput) |
 
 **Num celular de verdade.** Um iPhone no Safari, apontado à mão para um monitor
 1080p, recebeu uma imagem de 818 KB com `P1-conservative` a 23,7 KB/s com dez
