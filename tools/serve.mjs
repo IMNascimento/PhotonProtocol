@@ -147,6 +147,50 @@ async function capture(request, response, url) {
   response.writeHead(204).end();
 }
 
+/**
+ * Takes a line of measurements from a page, and prints it.
+ *
+ * What a phone actually did cannot be found out from a desk: the resolution
+ * its camera really gave, how long a picture really took it to read, the stage
+ * its pictures really stopped at. Both pages send these while `?capture` is in
+ * their address, and they are kept beside the pictures.
+ */
+async function log(request, response) {
+  const chunks = [];
+  for await (const chunk of request) chunks.push(chunk);
+
+  let entry;
+  try {
+    entry = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    response.writeHead(400).end();
+    return;
+  }
+
+  await mkdir(captures, { recursive: true });
+  await appendFile(join(captures, 'log.jsonl'), `${JSON.stringify(entry)}\n`);
+
+  if (entry.role === 'sender') {
+    console.log(
+      `  sender   ${String(entry.seconds).padStart(6)}s  ${entry.profile}, ` +
+        `${entry.cellPx} px/cell, ${entry.perSecond} codes/s on a ${entry.refresh} Hz screen, ` +
+        `${entry.paintMs} ms to paint, code ${entry.frames}`,
+    );
+  } else {
+    console.log(
+      `  receiver ${String(entry.seconds).padStart(6)}s  ${entry.camera} ` +
+        `${entry.perCell ?? '—'} px/cell  ${entry.perSecond}/s ` +
+        `(grab ${entry.grabMs} ms, read ${entry.decodeMs} ms)  ` +
+        `new ${entry.used} again ${entry.repeated} | lost: find ${entry.missed} ` +
+        `mid-change ${entry.straddled} header ${entry.headerLost} cells ${entry.cellsLost} | ` +
+        `${entry.accepted}/${entry.needed} blocks, ${(entry.rate / 1024).toFixed(1)} KB/s` +
+        `${entry.final ? `  ** ${entry.final} **` : ''}`,
+    );
+  }
+
+  response.writeHead(204).end();
+}
+
 async function handler(request, response) {
   const url = new URL(request.url, 'https://localhost');
 
@@ -162,6 +206,11 @@ async function handler(request, response) {
 
   if (request.method === 'POST' && url.pathname === '/capture') {
     await capture(request, response, url);
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/log') {
+    await log(request, response);
     return;
   }
 
@@ -204,25 +253,32 @@ const server = secure
 
 server.listen(port, '0.0.0.0', () => {
   const scheme = secure ? 'https' : 'http';
+  const reachable = addresses();
+  const phone = reachable.length > 0 ? reachable[0] : '<this machine>';
+
   console.log(`serving ${site}`);
-  console.log(`  on this machine   ${scheme}://localhost:${port}/`);
-  for (const address of addresses()) {
-    console.log(`  on the network    ${scheme}://${address}:${port}/`);
+  console.log();
+  console.log('  1. On this computer, open the sender:');
+  console.log(`       ${scheme}://localhost:${port}/emit/?capture`);
+  console.log('  2. On the phone, on the same network, open the receiver:');
+  for (const address of reachable) {
+    console.log(`       ${scheme}://${address}:${port}/decode/?capture`);
+  }
+  if (reachable.length === 0) {
+    console.log(`       ${scheme}://${phone}:${port}/decode/?capture`);
+    console.log('       (this machine has no network address; connect it to one first)');
   }
   console.log();
-  console.log('Open the sender on the screen you are filming and the receiver on the');
-  console.log('phone. The phone will warn about the certificate once; continue past it,');
-  console.log('or the camera will not be offered.');
+  console.log('The browser will warn about the certificate, once on each device, because');
+  console.log('nothing signed it. Choose to continue: without https the phone is not');
+  console.log('offered the camera at all.');
   console.log();
-  console.log('To record both ends, add ?capture to each page:');
-  console.log(`  sender    ${scheme}://<this machine>:${port}/emit/?capture`);
-  console.log(`  receiver  ${scheme}://<this machine>:${port}/decode/?capture`);
+  console.log('With ?capture in the address, both pages report here what they measure,');
+  console.log('and the receiver sends the pictures it could not read. They land in');
+  console.log('./captures, and what each end is doing is printed below as it happens.');
+  console.log('Leave ?capture off and nothing leaves either device.');
   console.log();
-  console.log('What was painted lands in ./captures/sent, what the camera saw in');
-  console.log('./captures/seen, and every report in ./captures/reports.jsonl. Then:');
-  console.log('  cargo run --release -p photon-cli -- decode captures/sent --debug-dir dbg/sent');
+  console.log('To look into pictures that would not read:');
   console.log('  cargo run --release -p photon-cli -- decode captures/seen --debug-dir dbg/seen');
   console.log();
-  console.log('The first must decode perfectly -- it is the source. If it does not, the');
-  console.log('fault is in what is being drawn, and the camera was never the problem.');
 });

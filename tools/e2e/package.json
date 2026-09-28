@@ -1,0 +1,9 @@
+{
+  "name": "photon-e2e",
+  "private": true,
+  "description": "Drives the real pages in a real browser, with a simulated camera",
+  "type": "module",
+  "devDependencies": {
+    "puppeteer-core": "^24.0.0"
+  }
+}
