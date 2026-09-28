@@ -39,6 +39,11 @@ const SWEEP_CELL_PX: u32 = 12;
     disable_help_subcommand = true
 )]
 struct Cli {
+    /// Read and paint frames as they were before they were whitened. For
+    /// pictures taken with an earlier build.
+    #[arg(long, global = true)]
+    unwhitened: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -227,6 +232,9 @@ impl From<Profile> for ProfileId {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if cli.unwhitened {
+        photon_core::session::set_whitening(false);
+    }
 
     let outcome = match cli.command {
         Command::Encode { input, out, profile, cell_px, passes, fps, video } => {

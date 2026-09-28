@@ -47,6 +47,46 @@ const MANIFEST_PERIOD: u32 = 1;
 /// actually there.
 const ERASURE_CONFIDENCE: f32 = 0.08;
 
+/// Whether frames are whitened. They are, unless a bench says otherwise.
+static WHITENING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// Turns whitening off, or back on, for everything in this process.
+///
+/// For a bench reading pictures that were taken before frames were whitened,
+/// and for nothing else: the pictures a real phone could not read are the
+/// best evidence there is of what a real phone does, and they were painted the
+/// old way. A sender and a receiver that disagree about this share no frames.
+pub fn set_whitening(on: bool) {
+    WHITENING.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Makes what is painted look like noise, whatever is sent; applied twice, it
+/// gives back what it was given.
+///
+/// A frame that is mostly padding is mostly one cell repeated, and so is a file
+/// of zeros. A decoder measures a frame by what is in it: where black and
+/// white are from the darkest and brightest of each neighbourhood, where the
+/// lattice is from the edges between cells, what each ink looks like from the
+/// cells painted in it. A frame of one cell repeated has no white, few edges
+/// and one ink, and reads as nothing.
+///
+/// The bytes are combined with a fixed sequence after error correction and
+/// before painting, so that every frame has every symbol in it about equally
+/// often. The sequence is a 32-bit xorshift started at `PHTN`, one byte from
+/// the top of each step.
+fn whiten(bytes: &mut [u8]) {
+    if !WHITENING.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let mut state = u32::from_be_bytes(crate::FRAME_MAGIC);
+    for byte in bytes {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        *byte ^= state.to_be_bytes()[0];
+    }
+}
+
 /// Cells between the ones the classifier is refitted to.
 ///
 /// Co-prime with every grid width, so the cells chosen wander across the frame
@@ -245,10 +285,11 @@ impl Transmitter {
             payload_len: u16::try_from(payload.len()).unwrap_or(u16::MAX),
         };
 
-        let raw = self.payload_codec.encode(&payload).map_err(|_| Error::Malformed {
+        let mut raw = self.payload_codec.encode(&payload).map_err(|_| Error::Malformed {
             context: "frame payload",
             detail: "payload does not fit the frame",
         })?;
+        whiten(&mut raw);
         let bits = self.layout.profile().bits_per_cell();
         let cells = bytes_to_cells(&raw, bits, self.layout.data_cells().len());
 
@@ -424,6 +465,9 @@ pub struct FrameOpening {
     /// How far the sampling grid had to be bent to fit, in cells.
     pub correction: f64,
     mesh: Mesh,
+    /// The homography the finder patterns gave, from which the other grids
+    /// are made when the fitted one turns out not to read.
+    transform: Homography,
 }
 
 impl FrameOpening {
@@ -1088,17 +1132,158 @@ fn timing_levels(layout: &FrameLayout, image: &RgbImage, mesh: &Mesh) -> (f32, f
     (mean(dark), mean(light))
 }
 
-/// Fits the per-frame classifier to the calibration ring.
-fn fit_classifier(layout: &FrameLayout, image: &RgbImage, mesh: &Mesh) -> Classifier {
+/// Side of the neighbourhoods black and white are measured in, in cells.
+const LEVEL_BLOCK: u32 = 12;
+
+/// What black and white look like in each neighbourhood of a frame.
+struct Levels {
+    blocks: u32,
+    /// Per neighbourhood: black, and the reciprocal of white less black, in
+    /// each channel.
+    black: Vec<[f32; 3]>,
+    scale: Vec<[f32; 3]>,
+}
+
+impl Levels {
+    /// Measures them from the payload.
+    ///
+    /// Half of every cell is unpainted and a quarter of all cells are painted
+    /// white, so in any neighbourhood of a hundred cells the darkest sub-cells
+    /// are black and the brightest are white, whatever the file holds. Taken a
+    /// little in from either end, so that a few stray values cannot set them.
+    fn of(layout: &FrameLayout, samples: &[crate::symbol::CellSample]) -> Self {
+        let grid = layout.grid();
+        let blocks = grid.div_ceil(LEVEL_BLOCK);
+        let count = (blocks * blocks) as usize;
+        let mut values: Vec<[Vec<f32>; 3]> =
+            (0..count).map(|_| [Vec::new(), Vec::new(), Vec::new()]).collect();
+
+        for (sample, &cell) in samples.iter().zip(layout.data_cells()) {
+            let (row, col) = layout.coordinates(cell);
+            let slot = &mut values[((row / LEVEL_BLOCK) * blocks + col / LEVEL_BLOCK) as usize];
+            for sub in &sample.sub {
+                slot[0].push(sub.r);
+                slot[1].push(sub.g);
+                slot[2].push(sub.b);
+            }
+        }
+
+        let mut black = vec![[0.0f32; 3]; count];
+        let mut scale = vec![[1.0f32; 3]; count];
+        let mut measured = vec![false; count];
+        for (index, channels) in values.iter_mut().enumerate() {
+            for (channel, list) in channels.iter_mut().enumerate() {
+                if list.len() < 64 {
+                    continue;
+                }
+                list.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+                let dark = list[list.len() * 8 / 100];
+                let light = list[list.len() * 96 / 100];
+                black[index][channel] = dark;
+                scale[index][channel] = 1.0 / (light - dark).max(0.04);
+                measured[index] = true;
+            }
+        }
+
+        // A neighbourhood with no payload in it — a corner, under a finder
+        // pattern — takes the levels of the nearest one that has.
+        let places: Vec<(u32, u32)> =
+            (0..blocks).flat_map(|row| (0..blocks).map(move |col| (row, col))).collect();
+        for (index, &(row, col)) in places.iter().enumerate() {
+            if measured[index] {
+                continue;
+            }
+            let nearest = places
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| measured[*other])
+                .min_by_key(|(_, (r, c))| r.abs_diff(row) + c.abs_diff(col))
+                .map(|(other, _)| other);
+            if let Some(other) = nearest {
+                black[index] = black[other];
+                scale[index] = scale[other];
+            }
+        }
+
+        Self { blocks, black, scale }
+    }
+
+    /// Puts a cell on the scale of its neighbourhood: black at nought, white at
+    /// one.
+    fn apply(&self, layout: &FrameLayout, cell: u32, sample: &mut crate::symbol::CellSample) {
+        let (row, col) = layout.coordinates(cell);
+
+        // Between the middles of the four neighbourhoods nearest, so that the
+        // scale does not step at their boundaries.
+        let last = (self.blocks - 1) as f32;
+        let place =
+            |at: u32| ((at as f32 + 0.5) / LEVEL_BLOCK as f32 - 0.5).clamp(0.0, last.max(0.0));
+        let (x, y) = (place(col), place(row));
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both were clamped to the neighbourhoods immediately above"
+        )]
+        let (x0, y0) = (x.floor() as u32, y.floor() as u32);
+        let (x1, y1) = ((x0 + 1).min(self.blocks - 1), (y0 + 1).min(self.blocks - 1));
+        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+
+        let blend = |field: &[[f32; 3]], channel: usize| {
+            let at = |r: u32, c: u32| field[(r * self.blocks + c) as usize][channel];
+            let top = at(y0, x0) + (at(y0, x1) - at(y0, x0)) * fx;
+            let bottom = at(y1, x0) + (at(y1, x1) - at(y1, x0)) * fx;
+            top + (bottom - top) * fy
+        };
+        let black: [f32; 3] = core::array::from_fn(|channel| blend(&self.black, channel));
+        let scale: [f32; 3] = core::array::from_fn(|channel| blend(&self.scale, channel));
+
+        for sub in &mut sample.sub {
+            *sub = crate::symbol::Rgbf::new(
+                (sub.r - black[0]) * scale[0],
+                (sub.g - black[1]) * scale[1],
+                (sub.b - black[2]) * scale[2],
+            );
+        }
+    }
+}
+
+/// Fits the per-frame classifier.
+///
+/// To the payload itself where the palette allows it, with the calibration ring
+/// to start from. Where two inks differ in brightness alone — the white and
+/// grey of the 8-colour palette — the payload cannot sort itself by hue, and
+/// the ring is fitted to first and the payload after.
+fn fit_classifier(
+    layout: &FrameLayout,
+    image: &RgbImage,
+    mesh: &Mesh,
+    samples: &[crate::symbol::CellSample],
+    levels: &Levels,
+) -> Classifier {
+    let alphabet = layout.alphabet();
     let labelled: Vec<(u16, crate::symbol::CellSample)> = layout
         .calibration_cells()
         .iter()
         .enumerate()
         .map(|(index, &cell)| {
-            (layout.calibration_value(index), layout.sample_cell_in(image, mesh, cell))
+            let mut sample = layout.sample_cell_in(image, mesh, cell);
+            levels.apply(layout, cell, &mut sample);
+            (layout.calibration_value(index), sample)
         })
         .collect();
-    Classifier::fit(layout.alphabet(), &labelled)
+
+    if alphabet.colours.len() <= 4 {
+        return Classifier::from_payload(alphabet, samples, &labelled);
+    }
+
+    let from_ring = Classifier::fit(alphabet, &labelled);
+    let (subset, first): (Vec<crate::symbol::CellSample>, Vec<crate::symbol::Classification>) =
+        samples
+            .iter()
+            .step_by(REFIT_STRIDE)
+            .map(|sample| (*sample, from_ring.classify(sample)))
+            .unzip();
+    from_ring.refit(&subset, &first)
 }
 
 /// Turns doubtful cells into the byte positions they touched.
@@ -1129,11 +1314,26 @@ fn open_frame(candidate: &Candidate, image: &RgbImage, transform: &Homography) -
         profile: candidate.id,
         correction: mesh.largest_correction(),
         mesh,
+        transform: *transform,
         pixels_per_cell: None,
         corners: None,
     };
 
-    let headers = read_headers(layout, image, &opening.mesh);
+    // Through the grid fitted to the payload, and if that reads nothing,
+    // through the others. A fit is a measurement and a measurement can be
+    // wrong; the header is checked twice over, so whichever grid reads it is
+    // right about it.
+    let mut headers = read_headers(layout, image, &opening.mesh);
+    if headers[0].is_none() && headers[1].is_none() {
+        for other in other_grids(layout, image, transform) {
+            headers = read_headers(layout, image, &other);
+            if headers[0].is_some() || headers[1].is_some() {
+                opening.correction = other.largest_correction();
+                opening.mesh = other;
+                break;
+            }
+        }
+    }
     let Some(header) = headers[0].or(headers[1]) else {
         return opening;
     };
@@ -1166,9 +1366,45 @@ fn open_frame(candidate: &Candidate, image: &RgbImage, transform: &Homography) -
 
 /// Reads the payload of a frame whose header has been read.
 fn read_payload(candidate: &Candidate, image: &RgbImage, opening: &FrameOpening) -> FrameReading {
+    let reading = read_payload_through(candidate, image, opening, &opening.mesh);
+    if reading.outcome != FrameOutcome::PayloadUnrecoverable {
+        return reading;
+    }
+
+    // The grid that read the header did not read the payload. Each of the
+    // others costs another reading and is sometimes the better, and parity
+    // says which without being told.
+    for other in other_grids(&candidate.layout, image, &opening.transform) {
+        let again = read_payload_through(candidate, image, opening, &other);
+        if again.outcome == FrameOutcome::Decoded {
+            return again;
+        }
+    }
+    reading
+}
+
+/// The grids to fall back on, in the order they are worth trying: the one
+/// fitted to the timing ring alone, then the homography as it stands.
+fn other_grids(
+    layout: &FrameLayout,
+    image: &RgbImage,
+    transform: &Homography,
+) -> impl Iterator<Item = Mesh> {
+    (0..2).map(move |which| match which {
+        0 => Mesh::fit_to_ring(layout, image, transform),
+        _ => Mesh::from_homography(layout, transform),
+    })
+}
+
+/// Reads the payload through one grid.
+fn read_payload_through(
+    candidate: &Candidate,
+    image: &RgbImage,
+    opening: &FrameOpening,
+    mesh: &Mesh,
+) -> FrameReading {
     let layout = &candidate.layout;
     let codec = &candidate.payload_codec;
-    let mesh = &opening.mesh;
 
     let mut reading = opening.reading(layout.data_cells().len());
     let Some(header) = opening.header else {
@@ -1178,26 +1414,23 @@ fn read_payload(candidate: &Candidate, image: &RgbImage, opening: &FrameOpening)
         return reading;
     }
 
-    // The classifier is fitted to this frame's own calibration ring, never to
-    // the nominal palette: exposure and white balance move while the camera
-    // records, so references from any other frame are already stale.
-    let classifier = fit_classifier(layout, image, mesh);
     let bits = layout.profile().bits_per_cell();
-
-    let samples: Vec<crate::symbol::CellSample> =
+    let mut samples: Vec<crate::symbol::CellSample> =
         layout.data_cells().iter().map(|&cell| layout.sample_cell_in(image, mesh, cell)).collect();
 
-    // Read some of it against the ring, then all of it against what that first
-    // reading says the payload itself looks like. A few thousand cells are
-    // plenty to measure sixteen templates from, and reading every cell twice
-    // would double the cost of the most expensive stage for nothing.
-    let (subset, first): (Vec<crate::symbol::CellSample>, Vec<crate::symbol::Classification>) =
-        samples
-            .iter()
-            .step_by(REFIT_STRIDE)
-            .map(|sample| (*sample, classifier.classify(sample)))
-            .unzip();
-    let classifier = classifier.refit(&subset, &first);
+    // What black and white look like is not one thing across a picture. A
+    // screen seen from a little above is washed out along its bottom edge, a
+    // lamp lifts one corner, and a lens darkens all four. Each cell is
+    // measured against the black and the white of its own neighbourhood.
+    let levels = Levels::of(layout, &samples);
+    for (sample, &cell) in samples.iter_mut().zip(layout.data_cells()) {
+        levels.apply(layout, cell, sample);
+    }
+
+    // The classifier is fitted to this frame and to no other: exposure and
+    // white balance move while the camera records, so references from any
+    // other frame are already stale.
+    let classifier = fit_classifier(layout, image, mesh, &samples, &levels);
 
     let mut cells = Vec::with_capacity(samples.len());
     let mut doubtful = Vec::new();
@@ -1210,7 +1443,8 @@ fn read_payload(candidate: &Candidate, image: &RgbImage, opening: &FrameOpening)
     }
     reading.doubtful_cells = doubtful.len();
 
-    let raw = cells_to_bytes(&cells, bits, codec.raw_len());
+    let mut raw = cells_to_bytes(&cells, bits, codec.raw_len());
+    whiten(&mut raw);
     let erasures = erasure_positions(&doubtful, bits);
     reading.cells = cells;
 
