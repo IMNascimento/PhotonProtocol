@@ -6,9 +6,12 @@
 //! per frame — because those are what settle the open questions in `SPEC.md`
 //! §12.
 
+mod bench;
 mod decode;
 mod encode;
+mod film;
 mod media;
+mod truth;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -86,6 +89,98 @@ enum Command {
         /// is landing in the wrong place, that is visible here and nowhere else.
         #[arg(long)]
         debug_dir: Option<PathBuf>,
+        /// The file that was sent. With it, every cell the decoder read is
+        /// compared against what the sender painted there.
+        #[arg(long)]
+        truth: Option<PathBuf>,
+        /// Print the comparison for every frame, not only the summary.
+        #[arg(long)]
+        verbose: bool,
+    },
+
+    /// Film a transfer with a simulated phone camera pointed at a simulated
+    /// monitor, and write the pictures a browser would have been handed.
+    Film {
+        /// The file the simulated sender is sending.
+        input: PathBuf,
+        /// Where to write the pictures.
+        #[arg(short, long)]
+        out: PathBuf,
+        /// Physical-layer profile.
+        #[arg(short, long, value_enum, default_value_t = Profile::P1)]
+        profile: Profile,
+        /// The monitor, as `WIDTHxHEIGHT`.
+        #[arg(long, default_value = "1920x1080")]
+        screen: String,
+        /// Pixels per cell. Fitted to the screen, as the sending page does,
+        /// when not given.
+        #[arg(long)]
+        cell_px: Option<u32>,
+        /// Display refreshes each code is held for.
+        #[arg(long, default_value_t = 4)]
+        hold: u32,
+        /// Display refresh rate.
+        #[arg(long, default_value_t = 60.0)]
+        refresh: f64,
+        /// The camera's picture, as `WIDTHxHEIGHT`.
+        #[arg(long, default_value = "1080x1920")]
+        camera: String,
+        /// Pictures per second.
+        #[arg(long, default_value_t = 30.0)]
+        fps: f64,
+        /// How long to film, in seconds.
+        #[arg(long, default_value_t = 4.0)]
+        seconds: f64,
+        /// How hostile the capture is.
+        #[arg(long, value_enum, default_value_t = film::Preset::Typical)]
+        preset: film::Preset,
+        /// Overrides the preset: side of the code as a fraction of the
+        /// picture's shorter side.
+        #[arg(long)]
+        fill: Option<f64>,
+        /// Overrides the preset: lens blur, in sensor pixels.
+        #[arg(long)]
+        blur: Option<f64>,
+        /// Overrides the preset: radial distortion at the corner.
+        #[arg(long)]
+        distortion: Option<f64>,
+        /// Overrides the preset: exposure time in milliseconds.
+        #[arg(long)]
+        exposure: Option<f64>,
+        /// Overrides the preset: sensor readout time in milliseconds.
+        #[arg(long)]
+        readout: Option<f64>,
+        /// Overrides the preset: where white lands relative to saturation.
+        #[arg(long)]
+        gain: Option<f32>,
+        /// Overrides the preset: hand tremor in degrees.
+        #[arg(long)]
+        shake: Option<f64>,
+        /// Which way the shutter rolls across the picture. A phone held
+        /// upright rolls sideways, which is what is assumed when not given.
+        #[arg(long, value_enum)]
+        sweep: Option<film::Sweep>,
+        /// Where in a code's time on screen the first picture is taken, 0 to 1.
+        #[arg(long)]
+        phase: Option<f64>,
+        /// Seed for every random draw.
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Do not write PNGs.
+        #[arg(long)]
+        no_png: bool,
+        /// Also write `camera.y4m`, which Chrome can play as a camera.
+        #[arg(long)]
+        y4m: bool,
+    },
+
+    /// Time each stage of reading a picture, on one core.
+    Bench {
+        /// A directory of pictures.
+        input: PathBuf,
+        /// How many of them to use.
+        #[arg(long, default_value_t = 40)]
+        frames: usize,
     },
 
     /// List the physical-layer profiles and their derived geometry.
@@ -124,9 +219,84 @@ fn main() -> ExitCode {
             let target = out.unwrap_or_else(|| encode::default_output(&input));
             encode::run(&input, &target, profile.into(), cell_px, passes, fps, video)
         }
-        Command::Decode { input, out, profile, max_frames, debug_dir } => {
-            decode::run(&input, &out, profile.map(Into::into), max_frames, debug_dir.as_deref())
+        Command::Decode { input, out, profile, max_frames, debug_dir, truth, verbose } => {
+            decode::run(&decode::Options {
+                input: &input,
+                output: &out,
+                profile: profile.map(Into::into),
+                max_frames,
+                debug_dir: debug_dir.as_deref(),
+                truth: truth.as_deref(),
+                verbose,
+            })
         }
+        Command::Film {
+            input,
+            out,
+            profile,
+            screen,
+            cell_px,
+            hold,
+            refresh,
+            camera,
+            fps,
+            seconds,
+            preset,
+            fill,
+            blur,
+            distortion,
+            exposure,
+            readout,
+            gain,
+            shake,
+            sweep,
+            phase,
+            seed,
+            no_png,
+            y4m,
+        } => (|| {
+            let mut model = film::CameraModel::preset(preset);
+            if let Some(value) = fill {
+                model.fill = value;
+            }
+            if let Some(value) = blur {
+                model.blur = value;
+            }
+            if let Some(value) = distortion {
+                model.distortion = value;
+            }
+            if let Some(value) = exposure {
+                model.exposure_ms = value;
+            }
+            if let Some(value) = readout {
+                model.readout_ms = value;
+            }
+            if let Some(value) = gain {
+                model.gain = value;
+            }
+            if let Some(value) = shake {
+                model.shake = value;
+            }
+            film::run(&film::Options {
+                input,
+                out,
+                profile: profile.into(),
+                screen: parse_size(&screen)?,
+                cell_px,
+                hold,
+                refresh,
+                camera: parse_size(&camera)?,
+                fps,
+                seconds,
+                model,
+                sweep,
+                phase,
+                seed,
+                png: !no_png,
+                y4m,
+            })
+        })(),
+        Command::Bench { input, frames } => bench::run(&input, frames),
         Command::Profiles => {
             print_profiles();
             Ok(())
@@ -143,6 +313,17 @@ fn main() -> ExitCode {
             eprintln!("photon: {message}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Reads `1920x1080`.
+fn parse_size(text: &str) -> Result<(u32, u32), String> {
+    let parsed = text
+        .split_once(['x', 'X'])
+        .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)));
+    match parsed {
+        Some((width, height)) if width > 0 && height > 0 => Ok((width, height)),
+        _ => Err(format!("'{text}' is not a size; write it as WIDTHxHEIGHT")),
     }
 }
 

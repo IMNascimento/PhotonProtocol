@@ -50,6 +50,25 @@ impl Tally {
     }
 }
 
+/// What to decode and how much to say about it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Options<'a> {
+    /// The recording, or a directory of pictures.
+    pub(crate) input: &'a Path,
+    /// Where the recovered file goes.
+    pub(crate) output: &'a Path,
+    /// The profile, when it is known.
+    pub(crate) profile: Option<ProfileId>,
+    /// Stop after this many pictures.
+    pub(crate) max_frames: Option<usize>,
+    /// Where to write what the decoder saw.
+    pub(crate) debug_dir: Option<&'a Path>,
+    /// The file that was sent, to count wrong cells against.
+    pub(crate) truth: Option<&'a Path>,
+    /// Report every frame.
+    pub(crate) verbose: bool,
+}
+
 /// Runs the decoder.
 ///
 /// # Errors
@@ -57,13 +76,8 @@ impl Tally {
 /// Returns a message suitable for printing. A failed decode is still a
 /// successful *run*: the report explains which stage gave up and how close it
 /// came, as `SPEC.md` §9.2 requires.
-pub(crate) fn run(
-    input: &Path,
-    output: &Path,
-    profile: Option<ProfileId>,
-    max_frames: Option<usize>,
-    debug_dir: Option<&Path>,
-) -> Result<(), String> {
+pub(crate) fn run(options: &Options<'_>) -> Result<(), String> {
+    let Options { input, output, profile, max_frames, debug_dir, truth, verbose } = *options;
     let scratch = std::env::temp_dir().join(format!("photon-decode-{}", std::process::id()));
     let (frames, timing) = gather_frames(input, &scratch, max_frames)?;
 
@@ -104,6 +118,10 @@ pub(crate) fn run(
             },
         })
         .collect();
+
+    if let Some(file) = truth {
+        report_truth(file, &readings, verbose)?;
+    }
 
     let mut receiver = receiver;
     let mut tally = Tally::default();
@@ -170,6 +188,19 @@ pub(crate) fn run(
             Err(format!("decode failed: {error}"))
         }
     }
+}
+
+/// Compares what was read against what was sent.
+fn report_truth(file: &Path, readings: &[FrameReading], verbose: bool) -> Result<(), String> {
+    let Some(header) = readings.iter().find_map(|reading| reading.header) else {
+        println!("No header was read, so there is nothing to compare against the file.");
+        println!();
+        return Ok(());
+    };
+    let profile = header.profile.profile();
+    let mut truth = crate::truth::Truth::new(file, header.profile, header.session_id)?;
+    crate::truth::report(&mut truth, readings, profile.rs_parity_rate() / 2.0, verbose);
+    Ok(())
 }
 
 /// Says which of the failures this was, and what changes it.
@@ -251,7 +282,13 @@ fn write_rectified(frames: &[std::path::PathBuf], directory: &Path) -> Result<()
         let Ok(detection) = detector.detect(&image) else { continue };
 
         let layout = FrameLayout::new(detection.profile.profile());
-        let rectified = layout.rectify(&image, &detection.transform, 8);
+        let mesh = photon_core::Mesh::fit(&layout, &image, &detection.transform);
+        println!(
+            "                frame {index}: ring located {:.0}%, largest correction {:.2} cells",
+            mesh.coverage() * 100.0,
+            mesh.largest_correction()
+        );
+        let rectified = layout.rectify(&image, &mesh, 8);
         let target = directory.join(format!("rectified-{index:03}.png"));
         media::write_png(&target, &rectified).map_err(|e| e.to_string())?;
         written += 1;
