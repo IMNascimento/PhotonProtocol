@@ -43,6 +43,7 @@ use std::collections::VecDeque;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use photon_core::dense::{DenseProfile, DenseTransmitter, QUIET_MODULES};
 use photon_core::frame::QUIET_ZONE_CELLS;
 use photon_core::session::Transmitter;
 use photon_core::{ProfileId, RgbImage};
@@ -133,7 +134,38 @@ pub(crate) struct CameraModel {
     pub(crate) pwm_duty: f64,
 }
 
+/// What the command line may say of a camera that its preset says otherwise.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Overrides {
+    /// Side of the code as a fraction of the picture's.
+    pub(crate) fill: Option<f64>,
+    /// Lens blur, in sensor pixels.
+    pub(crate) blur: Option<f64>,
+    /// Radial distortion at the corner.
+    pub(crate) distortion: Option<f64>,
+    /// Exposure time in milliseconds.
+    pub(crate) exposure: Option<f64>,
+    /// Sensor readout time in milliseconds.
+    pub(crate) readout: Option<f64>,
+    /// Where white lands relative to saturation.
+    pub(crate) gain: Option<f32>,
+    /// Hand tremor in degrees.
+    pub(crate) shake: Option<f64>,
+}
+
 impl CameraModel {
+    /// The same camera with what was asked for laid over it.
+    pub(crate) fn with(mut self, asked: &Overrides) -> Self {
+        self.fill = asked.fill.unwrap_or(self.fill);
+        self.blur = asked.blur.unwrap_or(self.blur);
+        self.distortion = asked.distortion.unwrap_or(self.distortion);
+        self.exposure_ms = asked.exposure.unwrap_or(self.exposure_ms);
+        self.readout_ms = asked.readout.unwrap_or(self.readout_ms);
+        self.gain = asked.gain.unwrap_or(self.gain);
+        self.shake = asked.shake.unwrap_or(self.shake);
+        self
+    }
+
     pub(crate) fn preset(preset: Preset) -> Self {
         match preset {
             Preset::Ideal => Self {
@@ -241,6 +273,8 @@ pub(crate) struct Options {
     pub(crate) out: PathBuf,
     /// Physical-layer profile.
     pub(crate) profile: ProfileId,
+    /// The dense profile, which is filmed instead when there is one.
+    pub(crate) dense: Option<&'static DenseProfile>,
     /// The monitor, in pixels.
     pub(crate) screen: (u32, u32),
     /// Pixels per cell, or `None` to fit the screen the way the sending page
@@ -287,6 +321,10 @@ const SCANOUT: f64 = 0.92;
 
 /// Samples taken per sensor pixel.
 const TAPS: usize = 32;
+
+/// The session every filmed transfer is given, so that `photon decode --truth`
+/// can paint the same codes again.
+pub(crate) const SESSION: u32 = 0x00C0_FFEE;
 
 // --- small deterministic noise ------------------------------------------------
 
@@ -360,20 +398,39 @@ fn linear_to_srgb(v: f32) -> f32 {
     if v <= 0.003_130_8 { v * 12.92 } else { 1.055f32.mul_add(v.powf(1.0 / 2.4), -0.055) }
 }
 
+/// Whatever is painting the codes.
+enum Sender {
+    Cells(Box<Transmitter>),
+    Dense(Box<DenseTransmitter>),
+}
+
+impl Sender {
+    fn next_code(&mut self, px: u32) -> Result<RgbImage, String> {
+        match self {
+            Self::Cells(transmitter) => {
+                transmitter.next_frame(px).map(|frame| frame.image).map_err(|e| e.to_string())
+            }
+            Self::Dense(transmitter) => Ok(transmitter.next_frame(px)),
+        }
+    }
+}
+
 /// The monitor and what it is showing.
 struct Display {
     width: u32,
     height: u32,
     /// Top-left corner of the code on the screen.
     origin: (u32, u32),
-    /// Side of the code, quiet zone included.
-    side: u32,
+    /// Width and height of the code, quiet zone included.
+    size: (u32, u32),
+    /// Height of the status bar along the bottom of the screen.
+    bar: u32,
     hold: u32,
     refresh_period: f64,
     /// Codes on hand, oldest first, and the index of the oldest.
     codes: VecDeque<RgbImage>,
     first_code: usize,
-    transmitter: Transmitter,
+    sender: Sender,
     cell_px: u32,
     lut: [f32; 256],
 }
@@ -382,8 +439,8 @@ impl Display {
     /// Makes sure codes `from..=to` are on hand.
     fn ensure(&mut self, from: usize, to: usize) -> Result<(), String> {
         while self.first_code + self.codes.len() <= to {
-            let frame = self.transmitter.next_frame(self.cell_px).map_err(|e| e.to_string())?;
-            self.codes.push_back(frame.image);
+            let code = self.sender.next_code(self.cell_px)?;
+            self.codes.push_back(code);
         }
         while self.first_code < from && self.codes.len() > 1 {
             self.codes.pop_front();
@@ -414,13 +471,13 @@ impl Display {
 
         if u >= 0.0 && v >= 0.0 && u < w && v < h {
             let (i, j) = (u as u32, v as u32);
-            if j >= self.height.saturating_sub(OVERLAY_BAR) {
+            if j >= self.height.saturating_sub(self.bar) {
                 // The status bar: white text on near-black, modelled as its
                 // average.
                 return Surface::Fixed([0.06, 0.06, 0.06]);
             }
             let (x0, y0) = self.origin;
-            if i >= x0 && j >= y0 && i < x0 + self.side && j < y0 + self.side {
+            if i >= x0 && j >= y0 && i < x0 + self.size.0 && j < y0 + self.size.1 {
                 return Surface::Code(i - x0, j - y0);
             }
             // The stage around the code, which the page paints white.
@@ -661,9 +718,9 @@ impl Rig<'_> {
         // The code sits in the middle of the screen, and that is what a person
         // aims at.
         let target = [
-            f64::from(display.origin.0) + f64::from(display.side) / 2.0
+            f64::from(display.origin.0) + f64::from(display.size.0) / 2.0
                 - f64::from(display.width) / 2.0,
-            f64::from(display.origin.1) + f64::from(display.side) / 2.0
+            f64::from(display.origin.1) + f64::from(display.size.1) / 2.0
                 - f64::from(display.height) / 2.0,
         ];
         let half = [f64::from(display.width) / 2.0, f64::from(display.height) / 2.0];
@@ -1005,6 +1062,14 @@ pub(crate) fn fit_cell_px(profile: ProfileId, screen: (u32, u32)) -> u32 {
     ((shortest / f64::from(cells)).floor() as u32).max(3)
 }
 
+/// The module size the sending page would choose for this screen: the largest
+/// whole number of pixels at which the code fits.
+pub(crate) fn fit_module_px(profile: &DenseProfile, screen: (u32, u32)) -> u32 {
+    let across = screen.0 / (profile.width() + 2 * QUIET_MODULES);
+    let down = screen.1 / (profile.height() + 2 * QUIET_MODULES);
+    across.min(down).max(1)
+}
+
 /// Films a transfer.
 ///
 /// # Errors
@@ -1020,29 +1085,58 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
         .ok_or_else(|| "the input has no usable file name".to_owned())?;
 
     let profile = options.profile.profile();
-    let cell_px = options.cell_px.unwrap_or_else(|| fit_cell_px(options.profile, options.screen));
-    let side = (profile.grid + 2 * QUIET_ZONE_CELLS) * cell_px;
-    if side > options.screen.0 || side > options.screen.1 {
+    let cell_px = options.cell_px.unwrap_or_else(|| match options.dense {
+        Some(dense) => fit_module_px(dense, options.screen),
+        None => fit_cell_px(options.profile, options.screen),
+    });
+    let size = if let Some(dense) = options.dense {
+        (
+            (dense.width() + 2 * QUIET_MODULES) * cell_px,
+            (dense.height() + 2 * QUIET_MODULES) * cell_px,
+        )
+    } else {
+        let side = (profile.grid + 2 * QUIET_ZONE_CELLS) * cell_px;
+        (side, side)
+    };
+    if size.0 > options.screen.0 || size.1 > options.screen.1 {
         return Err(format!(
-            "a {side}-pixel code does not fit a {}x{} screen",
-            options.screen.0, options.screen.1
+            "a code of {}x{} pixels does not fit a {}x{} screen",
+            size.0, size.1, options.screen.0, options.screen.1
         ));
     }
 
-    let transmitter =
-        Transmitter::new(name, &file, options.profile, 0x00C0_FFEE).map_err(|e| e.to_string())?;
-    let frames_per_pass = transmitter.frames_per_pass();
+    let (sender, frames_per_pass, carries, profile_name, unit) = if let Some(dense) = options.dense
+    {
+        let transmitter =
+            DenseTransmitter::new(name, &file, dense, SESSION).map_err(|e| e.to_string())?;
+        let (passes, carries) =
+            (transmitter.frames_per_pass(), transmitter.layout().bytes_per_frame());
+        (Sender::Dense(Box::new(transmitter)), passes, carries, dense.name, "module")
+    } else {
+        let transmitter =
+            Transmitter::new(name, &file, options.profile, SESSION).map_err(|e| e.to_string())?;
+        let passes = transmitter.frames_per_pass();
+        (
+            Sender::Cells(Box::new(transmitter)),
+            passes,
+            profile.payload_capacity() as usize,
+            profile.name,
+            "cell",
+        )
+    };
 
     let mut display = Display {
         width: options.screen.0,
         height: options.screen.1,
-        origin: ((options.screen.0 - side) / 2, (options.screen.1 - side) / 2),
-        side,
+        origin: ((options.screen.0 - size.0) / 2, (options.screen.1 - size.1) / 2),
+        size,
+        // A dense code is shown with the whole screen to itself.
+        bar: if options.dense.is_some() { 0 } else { OVERLAY_BAR },
         hold: options.hold.max(1),
         refresh_period: 1.0 / options.refresh,
         codes: VecDeque::new(),
         first_code: 0,
-        transmitter,
+        sender,
         cell_px,
         lut: srgb_to_linear_table(),
     };
@@ -1050,11 +1144,14 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
     let model = &options.model;
     let (width, height) = options.camera;
     let long = f64::from(width.max(height));
-    let short = f64::from(width.min(height));
     // A phone's main camera sees about 66 degrees along its longer side when
     // recording video.
     let focal = (long / 2.0) / 33.0f64.to_radians().tan();
-    let distance = focal * f64::from(side) / (model.fill * short);
+    // Camera pixels to a screen pixel: `fill` is how much of the picture the
+    // code takes up along whichever side it reaches first.
+    let magnification = model.fill
+        * (f64::from(width) / f64::from(size.0)).min(f64::from(height) / f64::from(size.1));
+    let distance = focal / magnification;
 
     let mut rng = Rng::new(options.seed);
     let sigma = model.blur.max(0.0);
@@ -1110,14 +1207,13 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
     // through a code, as it would be.
     let code_period = f64::from(display.hold) * display.refresh_period;
     let phase = options.phase.unwrap_or_else(|| rng.uniform()).clamp(0.0, 1.0) * code_period;
-    let magnification = model.fill * short / f64::from(side);
 
     println!("File            {name} ({} bytes)", file.len());
-    println!("Profile         {}", profile.name);
-    println!("Carries         {} bytes a code", profile.payload_capacity());
+    println!("Profile         {profile_name}");
+    println!("Carries         {carries} bytes a code");
     println!(
-        "Screen          {}x{} at {:.0} Hz, code {side}x{side} px, {cell_px} px per cell",
-        options.screen.0, options.screen.1, options.refresh
+        "Screen          {}x{} at {:.0} Hz, code {}x{} px, {cell_px} px per {unit}",
+        options.screen.0, options.screen.1, options.refresh, size.0, size.1
     );
     println!(
         "Codes           {:.1} per second ({} refreshes each), {frames_per_pass} per pass",
@@ -1129,7 +1225,7 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
         options.fps
     );
     println!(
-        "Seen at         about {:.1} camera pixels per cell",
+        "Seen at         about {:.1} camera pixels per {unit}",
         f64::from(cell_px) * magnification
     );
     println!();
@@ -1168,7 +1264,7 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
         writer.flush().map_err(|e| e.to_string())?;
     }
 
-    describe(&options.out, options, cell_px, side)?;
+    describe(&options.out, options, profile_name, cell_px, size)?;
     println!();
     println!("Written to      {}", options.out.display());
     Ok(())
@@ -1176,20 +1272,27 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
 
 /// Records what was filmed beside the pictures, so a result can be traced to
 /// the conditions that produced it.
-fn describe(out: &Path, options: &Options, cell_px: u32, side: u32) -> Result<(), String> {
+fn describe(
+    out: &Path,
+    options: &Options,
+    profile: &str,
+    cell_px: u32,
+    size: (u32, u32),
+) -> Result<(), String> {
     let model = &options.model;
     let text = format!(
         concat!(
             "input        {}\nprofile      {}\nscreen       {}x{} at {} Hz\n",
-            "code         {} px, {} px per cell\nhold         {} refreshes\n",
+            "code         {}x{} px, {} px per cell\nhold         {} refreshes\n",
             "camera       {}x{} at {} fps for {} s\nseed         {}\nmodel        {:#?}\n",
         ),
         options.input.display(),
-        options.profile.profile().name,
+        profile,
         options.screen.0,
         options.screen.1,
         options.refresh,
-        side,
+        size.0,
+        size.1,
         cell_px,
         options.hold,
         options.camera.0,

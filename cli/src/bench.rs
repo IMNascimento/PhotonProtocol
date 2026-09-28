@@ -32,6 +32,21 @@ pub(crate) fn run(input: &Path, limit: usize) -> Result<(), String> {
     };
     println!("Pictures        {} of {}x{}", images.len(), first.width(), first.height());
 
+    let dense = photon_core::dense::DenseReader::new();
+    if images.iter().take(6).any(|image| !dense.read(image).tiles.is_empty()) {
+        let (mut whole, mut tiles) = (Duration::ZERO, 0usize);
+        for image in &images {
+            let started = Instant::now();
+            let reading = dense.read(image);
+            whole += started.elapsed();
+            tiles += reading.tiles.len();
+        }
+        let each = whole.as_secs_f64() * 1000.0 / images.len() as f64;
+        println!("Tiles           {tiles}");
+        println!("Everything      {each:>7.2} ms a picture");
+        return Ok(());
+    }
+
     let detector = Detector::new();
     let mut detect = Duration::ZERO;
     let mut fit = Duration::ZERO;
