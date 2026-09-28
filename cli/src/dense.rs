@@ -31,6 +31,8 @@ pub(crate) struct Options<'a> {
     pub(crate) truth: Option<&'a Path>,
     /// Report every picture.
     pub(crate) verbose: bool,
+    /// The session the file was sent in, when no tile read to say.
+    pub(crate) session: Option<u32>,
 }
 
 /// The pictures to read.
@@ -187,7 +189,7 @@ pub(crate) fn run(options: &Options<'_>) -> Result<(), String> {
     println!();
 
     if let (Some(file), Some(profile)) = (options.truth, profile) {
-        report_truth(file, profile, &readings, options.verbose)?;
+        report_truth(file, profile, &readings, options)?;
     }
 
     let mut receiver = DenseReceiver::new();
@@ -252,19 +254,20 @@ fn report_truth(
     file: &Path,
     profile: &'static DenseProfile,
     readings: &[DenseReading],
-    verbose: bool,
+    options: &Options<'_>,
 ) -> Result<(), String> {
+    let verbose = options.verbose;
     let bytes = std::fs::read(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
     let name = file
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| "the file has no usable name".to_owned())?;
-    // With no tile to say which session this was, the one `photon film` gives
-    // every transfer it films.
+    // With no tile to say which session this was, the one that was given, or
+    // the one `photon film` gives every transfer it films.
     let session = readings
         .iter()
         .find_map(|r| r.tiles.first())
-        .map_or(crate::film::SESSION, |tile| tile.session);
+        .map_or(options.session.unwrap_or(crate::film::SESSION), |tile| tile.session);
 
     let last = readings
         .iter()

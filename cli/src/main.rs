@@ -104,6 +104,11 @@ enum Command {
         /// Print the comparison for every frame, not only the summary.
         #[arg(long)]
         verbose: bool,
+        /// The session the file was sent in, for `--truth` when the pictures
+        /// are of a dense code and not one tile of them read to say. The
+        /// sending page reports it with `?capture`.
+        #[arg(long)]
+        session: Option<u32>,
     },
 
     /// Film a transfer with a simulated phone camera pointed at a simulated
@@ -267,7 +272,7 @@ fn main() -> ExitCode {
             let target = out.unwrap_or_else(|| encode::default_output(&input));
             encode::run(&input, &target, profile.into(), cell_px, passes, fps, video)
         }
-        Command::Decode { input, out, profile, max_frames, debug_dir, truth, verbose } => {
+        Command::Decode { input, out, profile, max_frames, debug_dir, truth, verbose, session } => {
             if dense::is_dense(&input, profile.map(|p| p.dense().is_some())) {
                 dense::run(&dense::Options {
                     input: &input,
@@ -275,6 +280,7 @@ fn main() -> ExitCode {
                     max_frames,
                     truth: truth.as_deref(),
                     verbose,
+                    session,
                 })
             } else {
                 decode::run(&decode::Options {

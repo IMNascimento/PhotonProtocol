@@ -441,11 +441,11 @@ async function start() {
   }
 
   let emitter;
+  // Only has to be unlikely to collide with another transfer being filmed
+  // nearby; it is not a secret and the protocol does not treat it as one.
+  const session = crypto.getRandomValues(new Uint32Array(1))[0];
   try {
     const buffer = new Uint8Array(await file.arrayBuffer());
-    // Only has to be unlikely to collide with another transfer being filmed
-    // nearby; it is not a secret and the protocol does not treat it as one.
-    const session = crypto.getRandomValues(new Uint32Array(1))[0];
     emitter = profile.dense
       ? new DenseEmitter(file.name, buffer, profile.id, session)
       : new Emitter(file.name, buffer, profile.id, cellPx, session);
@@ -511,6 +511,7 @@ async function start() {
     height,
     cellPx,
     profile,
+    session,
     name: manifest.name,
     refresh,
     perPass: emitter.framesPerPass(),
@@ -653,6 +654,9 @@ function sendLog(now, rate) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       role: 'sender',
+      // With the file, this is every code that was painted: what a picture
+      // that would not read was a picture of.
+      session: running.session,
       seconds: Number(((now - running.began) / 1000).toFixed(1)),
       profile: running.profile.name,
       cellPx: running.cellPx,
