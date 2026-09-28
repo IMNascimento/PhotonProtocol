@@ -483,7 +483,12 @@ fn print_profiles() {
             format!("{}x{}", profile.width(), profile.height()),
             format!("{}x{}", profile.tile_cols, profile.tile_rows),
             layout.symbol_size(),
-            format!("2xRS(~{},-{})", layout.symbol_tile_capacity() / 2 + 32, profile.parity),
+            // Of a tile in the middle of the frame, which is most of them.
+            {
+                let codewords = layout.codewords(profile.tile_cols + 1);
+                let (length, data) = codewords.first().copied().unwrap_or((0, 0));
+                format!("{}xRS({length},{data})", codewords.len())
+            },
             layout.bytes_per_frame(),
         );
     }

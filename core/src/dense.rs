@@ -85,6 +85,11 @@ pub const MARK_CORE: u32 = 4;
 /// all of it.
 pub const TILE_OVERHEAD: usize = 17;
 
+/// How many tiles on from the last the tile that carries the manifest is, of
+/// the ones that are not corners. Odd and not a factor of any profile's
+/// number of tiles, so that every tile takes its turn.
+const MANIFEST_STRIDE: u32 = 11;
+
 /// What a tile carries.
 pub mod tile_kind {
     /// Nothing.
@@ -223,6 +228,11 @@ pub struct DenseLayout {
     /// filled.
     tiles: Vec<Vec<u32>>,
     codes: Vec<TileCode>,
+    /// Where in its tile's rectangle each of a tile's modules is, in the
+    /// order they are filled.
+    places: Vec<Vec<u32>>,
+    /// Which modules of each tile's rectangle are fixed, and whether dark.
+    fixed_in: Vec<Vec<Option<bool>>>,
     marks: Vec<Mark>,
     codec: RsCodec,
 }
@@ -280,11 +290,39 @@ impl DenseLayout {
         let codes =
             tiles.iter().map(|tile| TileCode::new(tile.len(), profile.parity as usize)).collect();
 
+        let places = tiles
+            .iter()
+            .enumerate()
+            .map(|(tile, modules)| {
+                let tile = tile as u32;
+                let top = (tile / profile.tile_cols) * profile.tile_height;
+                let left = (tile % profile.tile_cols) * profile.tile_width;
+                modules
+                    .iter()
+                    .map(|&module| {
+                        (module / width - top) * profile.tile_width + module % width - left
+                    })
+                    .collect()
+            })
+            .collect();
+        let fixed_in = (0..profile.tiles())
+            .map(|tile| {
+                let top = (tile / profile.tile_cols) * profile.tile_height;
+                let left = (tile % profile.tile_cols) * profile.tile_width;
+                (0..profile.tile_height)
+                    .flat_map(|row| (0..profile.tile_width).map(move |col| (row, col)))
+                    .map(|(row, col)| fixed[((top + row) * width + left + col) as usize])
+                    .collect()
+            })
+            .collect();
+
         Self {
             profile: *profile,
             fixed,
             tiles,
             codes,
+            places,
+            fixed_in,
             marks,
             codec: RsCodec::new(profile.parity as usize),
         }
@@ -312,6 +350,16 @@ impl DenseLayout {
         self.tiles.get(tile as usize).map_or(&[], Vec::as_slice)
     }
 
+    /// The Reed-Solomon codewords of a tile: the length of each, and how
+    /// many of its bytes are data.
+    #[must_use]
+    pub fn codewords(&self, tile: u32) -> Vec<(usize, usize)> {
+        let parity = self.profile.parity as usize;
+        self.codes.get(tile as usize).map_or_else(Vec::new, |code| {
+            code.lengths.iter().map(|&length| (length, length.saturating_sub(parity))).collect()
+        })
+    }
+
     /// Bytes of payload a tile holds.
     #[must_use]
     pub fn capacity(&self, tile: u32) -> usize {
@@ -336,11 +384,12 @@ impl DenseLayout {
         u16::try_from(room / 8 * 8).unwrap_or(0)
     }
 
-    /// Bytes of a file one frame carries.
+    /// Bytes of a file one frame carries: a symbol in every tile that is not
+    /// a corner, but for the one that carries the manifest.
     #[must_use]
     pub fn bytes_per_frame(&self) -> usize {
         let tiles = (0..self.profile.tiles()).filter(|&tile| !self.is_corner(tile)).count();
-        tiles * usize::from(self.symbol_size())
+        tiles.saturating_sub(1) * usize::from(self.symbol_size())
     }
 
     /// Size of a painted frame in pixels, margin included.
@@ -436,11 +485,9 @@ impl DenseLayout {
                     whole = false;
                     break;
                 };
-                let Ok(clean) = self.codec.encode(&data) else {
-                    whole = false;
-                    break;
-                };
-                repaired += clean.iter().zip(codeword.iter()).filter(|(a, b)| a != b).count();
+                // Of the bytes that carry data. What was repaired of the
+                // parity is not worth encoding the codeword again to count.
+                repaired += data.iter().zip(codeword.iter()).filter(|(a, b)| a != b).count();
                 payload.extend_from_slice(&data);
             }
             if !whole {
@@ -739,6 +786,7 @@ impl DenseTransmitter {
         let tiles = (0..self.layout.profile.tiles())
             .filter(|&tile| !self.layout.is_corner(tile))
             .count()
+            .saturating_sub(1)
             .max(1);
         self.encoder.source_symbol_count().div_ceil(tiles)
     }
@@ -761,8 +809,13 @@ impl DenseTransmitter {
         let payloads = (0..profile.tiles())
             .map(|index| {
                 // The four tiles with a finder pattern in them have less room
-                // than the rest, and the manifest needs sending somewhere.
-                let (kind, body) = if self.layout.is_corner(index) {
+                // than the rest, and the manifest needs sending somewhere. But
+                // the corners of a picture are where a lens is at its worst,
+                // and a receiver that has every symbol and no manifest has
+                // nothing. So one other tile of every frame carries it too,
+                // and not the same one from one frame to the next.
+                let also = (self.code.wrapping_mul(MANIFEST_STRIDE)) % profile.tiles();
+                let (kind, body) = if self.layout.is_corner(index) || index == also {
                     (tile_kind::MANIFEST, self.manifest_bytes.clone())
                 } else {
                     (tile_kind::SYMBOL, self.next_symbol())
@@ -818,8 +871,16 @@ const ROUND: [(f32, f32); 4] =
     [(EIGHTH, -EIGHTH), (EIGHTH, EIGHTH), (-EIGHTH, EIGHTH), (-EIGHTH, -EIGHTH)];
 const EIGHTH: f32 = core::f32::consts::FRAC_1_SQRT_2;
 
-/// How far from where the homography puts it a mark is looked for, in modules.
+/// How far from where it is expected a mark is looked for, in modules.
 const MARK_REACH: f64 = 3.5;
+
+/// How far a patch of the lattice may be from where the patches round it say
+/// it should be, in modules, before it is taken to have been measured wrongly.
+/// When it is wrong it is wrong by a module.
+const PATCH_OUT: f64 = 0.5;
+
+/// How far, when no mark beside it has been found to say where to expect it.
+const MARK_REACH_ALONE: f64 = 8.0;
 
 /// How strongly the marks must stand out before a frame is believed to be
 /// there, as a fraction of the range between dark and light.
@@ -851,6 +912,109 @@ pub struct DenseReading {
     /// Every module as it was read, row-major: whether it is light. Kept only
     /// when asked for.
     pub modules: Vec<bool>,
+}
+
+/// First byte of a packed reading.
+const READING_MAGIC: u8 = 0xD7;
+
+impl DenseReading {
+    /// Packs the reading, to be sent from where pictures are read to where
+    /// the transfer is kept. The modules kept for a bench are left behind.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = vec![READING_MAGIC, u8::from(self.located), self.profile.unwrap_or(0)];
+        out.push(u8::from(self.corners.is_some()));
+        for corner in self.corners.unwrap_or([Point::new(0.0, 0.0); 4]) {
+            out.extend_from_slice(&(corner.x as f32).to_le_bytes());
+            out.extend_from_slice(&(corner.y as f32).to_le_bytes());
+        }
+        out.extend_from_slice(&(self.pixels_per_module.unwrap_or(0.0) as f32).to_le_bytes());
+        out.extend_from_slice(&(self.correction as f32).to_le_bytes());
+        for count in [self.tiles_lost, self.bytes_repaired, self.bytes_read] {
+            out.extend_from_slice(&u32::try_from(count).unwrap_or(u32::MAX).to_le_bytes());
+        }
+
+        out.extend_from_slice(&u16::try_from(self.tiles.len()).unwrap_or(0).to_le_bytes());
+        for tile in &self.tiles {
+            out.extend_from_slice(&[tile.kind, tile.profile, tile.index]);
+            out.extend_from_slice(&tile.session.to_le_bytes());
+            out.extend_from_slice(&tile.code.to_le_bytes());
+            out.extend_from_slice(&u16::try_from(tile.body.len()).unwrap_or(0).to_le_bytes());
+            out.extend_from_slice(&tile.body);
+        }
+
+        out.extend_from_slice(&u16::try_from(self.unread.len()).unwrap_or(0).to_le_bytes());
+        for unread in &self.unread {
+            out.push(unread.index);
+            out.extend_from_slice(&u32::try_from(unread.seen.len()).unwrap_or(0).to_le_bytes());
+            out.extend(unread.seen.iter().map(|&value| value.to_le_bytes()[0]));
+        }
+        out
+    }
+
+    /// Unpacks a reading, or refuses bytes that are not one.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut rest = bytes;
+        let mut take = |count: usize| -> Option<&[u8]> {
+            let (taken, left) = rest.split_at_checked(count)?;
+            rest = left;
+            Some(taken)
+        };
+        let four = |bytes: &[u8]| -> Option<[u8; 4]> { bytes.try_into().ok() };
+
+        let head = take(4)?;
+        if head[0] != READING_MAGIC {
+            return None;
+        }
+        let mut reading = Self {
+            located: head[1] != 0,
+            profile: (head[2] != 0).then_some(head[2]),
+            ..Self::default()
+        };
+
+        let mut corners = [Point::new(0.0, 0.0); 4];
+        for corner in &mut corners {
+            let x = f32::from_le_bytes(four(take(4)?)?);
+            let y = f32::from_le_bytes(four(take(4)?)?);
+            *corner = Point::new(f64::from(x), f64::from(y));
+        }
+        reading.corners = (head[3] != 0).then_some(corners);
+
+        let per_module = f32::from_le_bytes(four(take(4)?)?);
+        reading.pixels_per_module = (per_module > 0.0).then_some(f64::from(per_module));
+        reading.correction = f64::from(f32::from_le_bytes(four(take(4)?)?));
+        reading.tiles_lost = u32::from_le_bytes(four(take(4)?)?) as usize;
+        reading.bytes_repaired = u32::from_le_bytes(four(take(4)?)?) as usize;
+        reading.bytes_read = u32::from_le_bytes(four(take(4)?)?) as usize;
+
+        let tiles = take(2)?;
+        for _ in 0..u16::from_le_bytes([tiles[0], tiles[1]]) {
+            let head = take(3)?;
+            let session = u32::from_le_bytes(four(take(4)?)?);
+            let code = u32::from_le_bytes(four(take(4)?)?);
+            let length = take(2)?;
+            let body = take(usize::from(u16::from_le_bytes([length[0], length[1]])))?.to_vec();
+            reading.tiles.push(Tile {
+                kind: head[0],
+                profile: head[1],
+                session,
+                code,
+                index: head[2],
+                body,
+            });
+        }
+
+        let unread = take(2)?;
+        for _ in 0..u16::from_le_bytes([unread[0], unread[1]]) {
+            let index = take(1)?[0];
+            let length = u32::from_le_bytes(four(take(4)?)?) as usize;
+            let seen = take(length)?.iter().map(|&byte| i8::from_le_bytes([byte])).collect();
+            reading.unread.push(Unread { index, seen });
+        }
+
+        rest.is_empty().then_some(reading)
+    }
 }
 
 /// Reads dense frames out of pictures, and keeps nothing.
@@ -914,32 +1078,40 @@ impl DenseReader {
 
         // Which profile, and which way up. The finder patterns say where the
         // corners are and nothing else, so each possibility is tried and the
-        // marks say which it was.
-        let mut best: Option<(f64, &DenseLayout, Homography, [Point; 4])> = None;
+        // marks say which it was: first where the homography puts them, which
+        // is quick, and if they are nowhere to be seen there, wherever they
+        // can be found.
+        let mut tried = Vec::new();
         for layout in &self.layouts {
             for turn in 0..4 {
                 let turned: [Point; 4] = core::array::from_fn(|i| corners[(i + turn) % 4]);
-                let Some(transform) = Homography::from_quads(layout.finder_centres(), turned)
-                else {
-                    continue;
-                };
-                if !is_square(&transform, layout) {
-                    continue;
-                }
-                let score = mark_score(&gray, layout, &transform);
-                if best.as_ref().is_none_or(|(found, ..)| score > *found) {
-                    best = Some((score, layout, transform, turned));
+                if let Some(transform) = Homography::from_quads(layout.finder_centres(), turned)
+                    && is_square(&transform, layout)
+                {
+                    let score = mark_score(&gray, layout, &transform);
+                    tried.push((score, layout, transform, turned, None));
                 }
             }
         }
-        let Some((score, layout, transform, corners)) = best else {
+        if tried.iter().all(|(score, ..)| *score < MIN_MARK_SCORE) {
+            for (score, layout, transform, _, marks) in &mut tried {
+                let (found, stood_out) = locate_marks(&gray, layout, transform);
+                *score = stood_out;
+                *marks = Some(found);
+            }
+        }
+        let best = tried
+            .into_iter()
+            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
+        let Some((score, layout, transform, corners, marks)) = best else {
             return DenseReading::default();
         };
         if score < MIN_MARK_SCORE {
             return DenseReading::default();
         }
+        let marks = marks.unwrap_or_else(|| locate_marks(&gray, layout, &transform).0);
 
-        let field = Field::measure(&gray, layout, &transform);
+        let field = Field::measure(&gray, layout, &transform, &marks);
         let samples = sample_modules(&gray, layout, &transform, &field);
         let seen = level(layout, &samples);
         let tiles = (0..layout.profile.tiles()).map(|tile| layout.bounds(tile)).collect();
@@ -951,11 +1123,6 @@ impl DenseReader {
             1.0,
             tiles,
         );
-        if self.equalise {
-            region.settle();
-        }
-        let belief = region.beliefs();
-
         let mut reading = DenseReading {
             located: true,
             profile: Some(layout.profile.id),
@@ -965,37 +1132,51 @@ impl DenseReader {
             ..DenseReading::default()
         };
 
-        for tile in 0..layout.profile.tiles() {
-            let Some((found, repaired)) = layout.read_tile(tile, &layout.cut(tile, &belief)) else {
-                reading.tiles_lost += 1;
-                if self.keep_unread {
-                    let seen = layout
-                        .cut(tile, &region.seen)
-                        .iter()
-                        .map(|&value| (value * KEPT_SCALE).round().clamp(-127.0, 127.0) as i8)
-                        .collect();
-                    reading.unread.push(Unread { index: tile as u8, seen });
-                }
-                continue;
-            };
-            reading.bytes_repaired += repaired;
-            reading.bytes_read += layout.codes[tile as usize].raw;
-
-            // The code that was on the screen before this one, or the one
-            // after, may be under it.
-            let seen = layout.cut(tile, &region.seen);
-            let known = Known { code: found.code, modules: layout.painted(&found) };
-            if self.equalise
-                && let Some(under) = layout.read_under(tile, seen, &[&known])
-                && under.code != found.code
-            {
-                reading.tiles.push(under);
+        // Every tile once, and the ones that would not read once more.
+        let mut unread: Vec<usize> = (0..layout.profile.tiles() as usize).collect();
+        for _ in 0..if self.equalise { ROUNDS } else { 1 } {
+            if self.equalise {
+                region.settle(&unread);
             }
-            reading.tiles.push(found);
+            unread.retain(|&tile| {
+                let index = tile as u32;
+                let Some((found, repaired)) = layout.read_tile(index, &region.beliefs_of(tile))
+                else {
+                    return true;
+                };
+                reading.bytes_repaired += repaired;
+                reading.bytes_read += layout.codes[tile].raw;
+
+                // The code that was on the screen before this one, or the one
+                // after, may be under it.
+                if self.equalise && region.left_over(tile) > UNDER_AT {
+                    let seen = layout.cut(index, &region.seen);
+                    let known = Known { code: found.code, modules: layout.painted(&found) };
+                    if let Some(under) = layout.read_under(index, seen, &[&known])
+                        && under.code != found.code
+                    {
+                        reading.tiles.push(under);
+                    }
+                }
+                reading.tiles.push(found);
+                false
+            });
+        }
+
+        reading.tiles_lost = unread.len();
+        if self.keep_unread {
+            for &tile in &unread {
+                let seen = layout
+                    .cut(tile as u32, &region.seen)
+                    .iter()
+                    .map(|&value| (value * KEPT_SCALE).round().clamp(-127.0, 127.0) as i8)
+                    .collect();
+                reading.unread.push(Unread { index: tile as u8, seen });
+            }
         }
 
         if self.keep_modules {
-            reading.modules = belief.iter().map(|&value| value > 0.0).collect();
+            reading.modules = region.beliefs().iter().map(|&value| value > 0.0).collect();
         }
         reading
     }
@@ -1173,17 +1354,27 @@ impl Field {
     /// Measures it: coarsely from the marks, which can be located outright,
     /// and then finely from the lattice of the modules, which is known to
     /// within a module and no better.
-    fn measure(gray: &Gray, layout: &DenseLayout, transform: &Homography) -> Self {
+    fn measure(
+        gray: &Gray,
+        layout: &DenseLayout,
+        transform: &Homography,
+        marks: &[(f64, f64, f64)],
+    ) -> Self {
         let profile = &layout.profile;
-        let marks = locate_marks(gray, layout, transform);
-        let coarse = Self {
+        let mut coarse = Self {
             cols: profile.tile_cols as usize,
             rows: profile.tile_rows as usize,
             pitch: (f64::from(profile.tile_width), f64::from(profile.tile_height)),
             dx: marks.iter().map(|m| m.0).collect(),
             dy: marks.iter().map(|m| m.1).collect(),
-        }
-        .settled();
+        };
+        // A mark that stood out is where it was found, however far that is
+        // from where the marks round it suggest: between one mark and the next
+        // a lens bends a picture by more than can be told apart from a
+        // mistake. One that did not stand out was not found, and is put where
+        // they suggest.
+        let mut found: Vec<bool> = marks.iter().map(|mark| mark.2 >= MIN_MARK_SCORE).collect();
+        coarse.fill(&mut found);
 
         let cols = (profile.width() / PATCH).max(2) as usize;
         let rows = (profile.height() / PATCH).max(2) as usize;
@@ -1289,7 +1480,24 @@ impl Field {
                 known[at] = true;
             }
         }
-        fine.outvote(&known);
+        fine.outvote(Some(&known), PATCH_OUT);
+
+        // And at the four finder patterns there is nothing left over at all:
+        // they are what the homography was fitted to. A lens that bends the
+        // middle of a code one way has bent it back by the corner, and
+        // nothing between the last mark and the corner says so but this.
+        for centre in layout.finder_centres() {
+            let col = ((centre.x / pitch.0) as usize).min(cols - 1);
+            let row = ((centre.y / pitch.1) as usize).min(rows - 1);
+            let at = row * cols + col;
+            let nearest = |measured: f64| measured - measured.round();
+            (fine.dx[at], fine.dy[at]) = if weight(at) < faint {
+                (0.0, 0.0)
+            } else {
+                (nearest(measured[at].0), nearest(measured[at].1))
+            };
+            known[at] = true;
+        }
 
         // Beyond the marks the coarse field is a guess, and a lens bends a
         // picture most at its edges, so the guess can be out by more than the
@@ -1302,20 +1510,38 @@ impl Field {
             let mut settled = Vec::new();
             for at in (0..cols * rows).filter(|&at| !known[at]) {
                 let (row, col) = (at / cols, at % cols);
-                let (mut sum_x, mut sum_y, mut count) = (0.0, 0.0, 0.0);
-                for r in row.saturating_sub(1)..=(row + 1).min(rows - 1) {
-                    for c in col.saturating_sub(1)..=(col + 1).min(cols - 1) {
-                        if known[r * cols + c] {
-                            sum_x += fine.dx[r * cols + c];
-                            sum_y += fine.dy[r * cols + c];
-                            count += 1.0;
-                        }
-                    }
+                // Where each settled patch beside this one says it will be:
+                // as far again from that patch as that patch is from the one
+                // beyond it, because a lens bends a picture more the further
+                // out it is. And of what they say, the middle one.
+                let (mut xs, mut ys) = (Vec::with_capacity(8), Vec::with_capacity(8));
+                for (dr, dc) in
+                    [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+                {
+                    let step = |n: isize| {
+                        let (r, c) = (row as isize + dr * n, col as isize + dc * n);
+                        (r >= 0 && c >= 0 && r < rows as isize && c < cols as isize)
+                            .then(|| r as usize * cols + c as usize)
+                            .filter(|&index| known[index])
+                    };
+                    let Some(near) = step(1) else { continue };
+                    let (x, y) = step(2).map_or((fine.dx[near], fine.dy[near]), |far| {
+                        (
+                            2.0f64.mul_add(fine.dx[near], -fine.dx[far]),
+                            2.0f64.mul_add(fine.dy[near], -fine.dy[far]),
+                        )
+                    });
+                    xs.push(x);
+                    ys.push(y);
                 }
-                if count == 0.0 {
+                if xs.is_empty() {
                     continue;
                 }
-                let (x, y) = (sum_x / count, sum_y / count);
+                let middle = |values: &mut Vec<f64>| {
+                    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+                    values[values.len() / 2]
+                };
+                let (x, y) = (middle(&mut xs), middle(&mut ys));
                 if weight(at) < faint {
                     settled.push((at, x, y));
                 } else {
@@ -1333,61 +1559,93 @@ impl Field {
                 known[at] = true;
             }
         }
-        fine.settled()
+        fine.outvote(None, PATCH_OUT);
+        fine
     }
 
-    /// Replaces each patch that is known with the median of itself and the
-    /// known patches round it.
-    fn outvote(&mut self, known: &[bool]) {
+    /// Puts each patch that is not known where the known patches round it say
+    /// it should be, the ones with most to go on first.
+    fn fill(&mut self, known: &mut [bool]) {
+        while known.iter().any(|known| !known) {
+            let mut settled = Vec::new();
+            for at in (0..known.len()).filter(|&at| !known[at]) {
+                let x = self.expected(&self.dx, Some(known), at);
+                let y = self.expected(&self.dy, Some(known), at);
+                if let (Some(x), Some(y)) = (x, y) {
+                    settled.push((at, x, y));
+                }
+            }
+            if settled.is_empty() {
+                // Nothing is known at all, or nothing beside what is not.
+                for at in (0..known.len()).filter(|&at| !known[at]) {
+                    (self.dx[at], self.dy[at]) = (0.0, 0.0);
+                }
+                return;
+            }
+            for (at, x, y) in settled {
+                (self.dx[at], self.dy[at]) = (x, y);
+                known[at] = true;
+            }
+        }
+    }
+
+    /// Where the patches round a patch say it should be: on the line through
+    /// them, not at their middle. A lens bends a picture more the further out
+    /// it is, so the field has a slope, and at the edge of a frame every
+    /// neighbour a patch has is on the same side of it.
+    fn expected(&self, field: &[f64], known: Option<&[bool]>, at: usize) -> Option<f64> {
         let (cols, rows) = (self.cols, self.rows);
+        let (row, col) = (at / cols, at % cols);
+        let value = |dr: isize, dc: isize, n: isize| {
+            let (r, c) = (row as isize + dr * n, col as isize + dc * n);
+            (r >= 0 && c >= 0 && r < rows as isize && c < cols as isize)
+                .then(|| r as usize * cols + c as usize)
+                .filter(|&index| known.is_none_or(|known| known[index]))
+                .map(|index| field[index])
+        };
+
+        // Along each of the four lines through the patch: halfway between the
+        // patches either side of it, or as far again from the nearer of two
+        // on one side as that is from the further, or failing that where the
+        // one beside it is.
+        let mut said = Vec::with_capacity(8);
+        for (dr, dc) in [(0, 1), (1, 0), (1, 1), (1, -1)] {
+            match (value(dr, dc, -1), value(dr, dc, 1)) {
+                (Some(before), Some(after)) => said.push(f64::midpoint(before, after)),
+                (Some(near), None) => {
+                    said.push(value(dr, dc, -2).map_or(near, |far| 2.0f64.mul_add(near, -far)));
+                }
+                (None, Some(near)) => {
+                    said.push(value(dr, dc, 2).map_or(near, |far| 2.0f64.mul_add(near, -far)));
+                }
+                (None, None) => {}
+            }
+        }
+        if said.is_empty() {
+            return None;
+        }
+        said.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+        Some(said[said.len() / 2])
+    }
+
+    /// Replaces each patch that is further than `tolerance` from where the
+    /// patches round it say it should be with where they say. `known` says
+    /// which patches have been measured, when not all of them have.
+    fn outvote(&mut self, known: Option<&[bool]>, tolerance: f64) {
         let smooth = |field: &[f64]| -> Vec<f64> {
-            (0..rows * cols)
+            (0..field.len())
                 .map(|at| {
-                    if !known[at] {
+                    if known.is_some_and(|known| !known[at]) {
                         return field[at];
                     }
-                    let (row, col) = (at / cols, at % cols);
-                    let mut near = Vec::with_capacity(9);
-                    for r in row.saturating_sub(1)..=(row + 1).min(rows - 1) {
-                        for c in col.saturating_sub(1)..=(col + 1).min(cols - 1) {
-                            if known[r * cols + c] {
-                                near.push(field[r * cols + c]);
-                            }
-                        }
+                    match self.expected(field, known, at) {
+                        Some(expected) if (field[at] - expected).abs() > tolerance => expected,
+                        _ => field[at],
                     }
-                    near.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
-                    near[near.len() / 2]
                 })
                 .collect()
         };
-        self.dx = smooth(&self.dx);
-        self.dy = smooth(&self.dy);
-    }
-
-    /// The same field with each patch replaced by the median of itself and the
-    /// patches round it, so that one measured wrongly is outvoted.
-    fn settled(mut self) -> Self {
-        let median = |values: &mut Vec<f64>| {
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
-            values[values.len() / 2]
-        };
-        let smooth = |field: &[f64], cols: usize, rows: usize| -> Vec<f64> {
-            (0..rows * cols)
-                .map(|at| {
-                    let (row, col) = (at / cols, at % cols);
-                    let mut near = Vec::with_capacity(9);
-                    for r in row.saturating_sub(1)..=(row + 1).min(rows - 1) {
-                        for c in col.saturating_sub(1)..=(col + 1).min(cols - 1) {
-                            near.push(field[r * cols + c]);
-                        }
-                    }
-                    median(&mut near)
-                })
-                .collect()
-        };
-        self.dx = smooth(&self.dx, self.cols, self.rows);
-        self.dy = smooth(&self.dy, self.cols, self.rows);
-        self
+        (self.dx, self.dy) = (smooth(&self.dx), smooth(&self.dy));
     }
 
     /// The displacement at a position in modules.
@@ -1421,84 +1679,163 @@ impl Field {
 }
 
 /// Finds each mark, and says how far it is from where the homography puts it,
-/// in modules.
+/// in modules, and how well it stood out; and how well they did on the whole.
 ///
 /// A mark is a square of one shade in a square of the other, so where it is
 /// can be found by laying that shape over the picture everywhere nearby and
 /// seeing where it fits best. Unlike the phase of a lattice, the answer is not
 /// one of several a module apart.
-fn locate_marks(gray: &Gray, layout: &DenseLayout, transform: &Homography) -> Vec<(f64, f64)> {
+///
+/// Nearby is near where the marks beside it were found. The homography is
+/// right at the four corners, which is where it was fitted, and a lens that
+/// bends a picture bends the middle of a code away from it by more modules
+/// than a search can reach. But from one mark to the next the bend changes
+/// little. So the marks are found from the corners inward, each looked for
+/// where the ones already found say it will be.
+fn locate_marks(
+    gray: &Gray,
+    layout: &DenseLayout,
+    transform: &Homography,
+) -> (Vec<(f64, f64, f64)>, f64) {
     const STEP: f64 = 0.5;
-    let reach = (MARK_REACH / STEP) as i32;
     let half = (f64::from(MARK_BOX) / 2.0 / STEP) as i32;
     let core = (f64::from(MARK_CORE) / 2.0 / STEP) as i32;
-    let side = (2 * (reach + half) + 1) as usize;
+    let (cols, rows) = (layout.profile.tile_cols as usize, layout.profile.tile_rows as usize);
 
-    layout
-        .marks
-        .iter()
-        .map(|mark| {
-            // Brightness on a grid of half modules, as a summed-area table.
-            let mut table = vec![0.0f64; (side + 1) * (side + 1)];
-            for j in 0..side {
-                let mut run = 0.0;
-                for i in 0..side {
-                    // The middle of each step, so that a box of a whole number
-                    // of steps is as far to one side of its centre as to the
-                    // other.
-                    let dx = (f64::from(i as i32 - reach - half) + 0.5) * STEP;
-                    let dy = (f64::from(j as i32 - reach - half) + 0.5) * STEP;
-                    let value = transform
-                        .map(Point::new(mark.x + dx, mark.y + dy))
-                        .and_then(|at| luma(gray, at))
-                        .unwrap_or(0.5);
-                    run += value;
-                    table[(j + 1) * (side + 1) + i + 1] = table[j * (side + 1) + i + 1] + run;
+    // Nearest a corner first.
+    let mut order: Vec<usize> = (0..layout.marks.len()).collect();
+    order.sort_by_key(|&tile| {
+        let (row, col) = (tile / cols, tile % cols);
+        row.min(rows - 1 - row) + col.min(cols - 1 - col)
+    });
+
+    let mut found: Vec<Option<(f64, f64, f64)>> = vec![None; layout.marks.len()];
+    let mut table = Vec::new();
+    let mut squares = Vec::new();
+    for tile in order {
+        let mark = layout.marks[tile];
+        let (row, col) = (tile / cols, tile % cols);
+
+        // Where each mark beside this one says it will be: as far again from
+        // that mark as that mark is from the one beyond it. And of what they
+        // say the middle one, which a mark found in the wrong place does not
+        // move.
+        let (mut xs, mut ys) = (Vec::with_capacity(8), Vec::with_capacity(8));
+        for (dr, dc) in [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)] {
+            let step = |n: isize| {
+                let (r, c) = (row as isize + dr * n, col as isize + dc * n);
+                (r >= 0 && c >= 0 && r < rows as isize && c < cols as isize)
+                    .then(|| found[r as usize * cols + c as usize])
+                    .flatten()
+                    .filter(|mark| mark.2 >= MIN_MARK_SCORE)
+            };
+            let Some(near) = step(1) else { continue };
+            let (x, y) = step(2).map_or((near.0, near.1), |far| {
+                (2.0f64.mul_add(near.0, -far.0), 2.0f64.mul_add(near.1, -far.1))
+            });
+            xs.push(x);
+            ys.push(y);
+        }
+        // With no mark beside it found, a mark is looked for further afield.
+        let reach = (if xs.is_empty() { MARK_REACH_ALONE } else { MARK_REACH } / STEP) as i32;
+        let side = (2 * (reach + half) + 1) as usize;
+        let middle = |values: &mut Vec<f64>| {
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+            values.get(values.len() / 2).copied().unwrap_or(0.0)
+        };
+        // In whole steps, so that the search is on the same grid either way.
+        let expected =
+            ((middle(&mut xs) / STEP).round() * STEP, (middle(&mut ys) / STEP).round() * STEP);
+
+        // Brightness on a grid of half modules, and its square, as summed-area
+        // tables.
+        table.clear();
+        table.resize((side + 1) * (side + 1), 0.0f64);
+        squares.clear();
+        squares.resize((side + 1) * (side + 1), 0.0f64);
+        for j in 0..side {
+            let (mut run, mut run_squares) = (0.0, 0.0);
+            for i in 0..side {
+                // The middle of each step, so that a box of a whole number
+                // of steps is as far to one side of its centre as to the
+                // other.
+                let dx = expected.0 + (f64::from(i as i32 - reach - half) + 0.5) * STEP;
+                let dy = expected.1 + (f64::from(j as i32 - reach - half) + 0.5) * STEP;
+                let value = transform
+                    .map(Point::new(mark.x + dx, mark.y + dy))
+                    .and_then(|at| luma(gray, at))
+                    .unwrap_or(0.5);
+                run += value;
+                run_squares += value * value;
+                let (here, above) = ((j + 1) * (side + 1) + i + 1, j * (side + 1) + i + 1);
+                table[here] = table[above] + run;
+                squares[here] = squares[above] + run_squares;
+            }
+        }
+        let sum = |of: &[f64], x0: i32, y0: i32, x1: i32, y1: i32| {
+            let at = |x: i32, y: i32| of[y as usize * (side + 1) + x as usize];
+            at(x1, y1) - at(x0, y1) - at(x1, y0) + at(x0, y0)
+        };
+
+        // How much lighter the border is than the middle, less how far either
+        // is from being all of one shade. Among modules that are light or
+        // dark as the file has it, a square that happens to be lighter round
+        // its edge than in its middle is not hard to find. One that is light
+        // all round its edge and dark all through its middle is.
+        let score = |ox: i32, oy: i32| {
+            let (cx, cy) = (reach + half + ox, reach + half + oy);
+            let (area, inner_area) = (f64::from(4 * half * half), f64::from(4 * core * core));
+            let whole = sum(&table, cx - half, cy - half, cx + half, cy + half);
+            let inner = sum(&table, cx - core, cy - core, cx + core, cy + core);
+            let whole_squares = sum(&squares, cx - half, cy - half, cx + half, cy + half);
+            let inner_squares = sum(&squares, cx - core, cy - core, cx + core, cy + core);
+
+            let outer_mean = (whole - inner) / (area - inner_area);
+            let inner_mean = inner / inner_area;
+            let outer_spread = ((whole_squares - inner_squares) / (area - inner_area)
+                - outer_mean * outer_mean)
+                .max(0.0)
+                .sqrt();
+            let inner_spread =
+                (inner_squares / inner_area - inner_mean * inner_mean).max(0.0).sqrt();
+
+            let contrast = outer_mean - inner_mean;
+            (if mark.inverted { -contrast } else { contrast })
+                - f64::midpoint(outer_spread, inner_spread)
+        };
+
+        let mut best = (f64::NEG_INFINITY, 0, 0);
+        for oy in -reach..=reach {
+            for ox in -reach..=reach {
+                let found = score(ox, oy);
+                if found > best.0 {
+                    best = (found, ox, oy);
                 }
             }
-            let sum = |x0: i32, y0: i32, x1: i32, y1: i32| {
-                let at = |x: i32, y: i32| table[y as usize * (side + 1) + x as usize];
-                at(x1, y1) - at(x0, y1) - at(x1, y0) + at(x0, y0)
-            };
+        }
 
-            let score = |ox: i32, oy: i32| {
-                let (cx, cy) = (reach + half + ox, reach + half + oy);
-                let whole = sum(cx - half, cy - half, cx + half, cy + half);
-                let inner = sum(cx - core, cy - core, cx + core, cy + core);
-                let (area, inner_area) = (f64::from(4 * half * half), f64::from(4 * core * core));
-                let contrast = (whole - inner) / (area - inner_area) - inner / inner_area;
-                if mark.inverted { -contrast } else { contrast }
-            };
+        // Between the steps, by the parabola through the best and the two
+        // either side of it.
+        let refine = |before: f64, at: f64, after: f64| {
+            let bend = before - 2.0 * at + after;
+            if bend.abs() < 1e-9 { 0.0 } else { (0.5 * (before - after) / bend).clamp(-0.5, 0.5) }
+        };
+        let (ox, oy) = (best.1, best.2);
+        let inside = |v: i32| v > -reach && v < reach;
+        let fx =
+            if inside(ox) { refine(score(ox - 1, oy), best.0, score(ox + 1, oy)) } else { 0.0 };
+        let fy =
+            if inside(oy) { refine(score(ox, oy - 1), best.0, score(ox, oy + 1)) } else { 0.0 };
+        found[tile] = Some((
+            expected.0 + (f64::from(ox) + fx) * STEP,
+            expected.1 + (f64::from(oy) + fy) * STEP,
+            best.0,
+        ));
+    }
 
-            let mut best = (f64::NEG_INFINITY, 0, 0);
-            for oy in -reach..=reach {
-                for ox in -reach..=reach {
-                    let found = score(ox, oy);
-                    if found > best.0 {
-                        best = (found, ox, oy);
-                    }
-                }
-            }
-
-            // Between the steps, by the parabola through the best and the two
-            // either side of it.
-            let refine = |before: f64, at: f64, after: f64| {
-                let bend = before - 2.0 * at + after;
-                if bend.abs() < 1e-9 {
-                    0.0
-                } else {
-                    (0.5 * (before - after) / bend).clamp(-0.5, 0.5)
-                }
-            };
-            let (ox, oy) = (best.1, best.2);
-            let inside = |v: i32| v > -reach && v < reach;
-            let fx =
-                if inside(ox) { refine(score(ox - 1, oy), best.0, score(ox + 1, oy)) } else { 0.0 };
-            let fy =
-                if inside(oy) { refine(score(ox, oy - 1), best.0, score(ox, oy + 1)) } else { 0.0 };
-            ((f64::from(ox) + fx) * STEP, (f64::from(oy) + fy) * STEP)
-        })
-        .collect()
+    let found: Vec<(f64, f64, f64)> = found.into_iter().map(Option::unwrap_or_default).collect();
+    let stood_out = found.iter().map(|mark| mark.2).sum::<f64>() / found.len().max(1) as f64;
+    (found, stood_out)
 }
 
 /// The light at the middle of every module, row-major.
@@ -1674,6 +2011,8 @@ struct Region {
     fixed: Vec<bool>,
     /// The rectangles a channel is measured over.
     tiles: Vec<(core::ops::Range<usize>, core::ops::Range<usize>)>,
+    /// The channel each was last found to have.
+    channels: Vec<Option<Channel>>,
 }
 
 impl Region {
@@ -1700,65 +2039,114 @@ impl Region {
             }
         }
         let fixed = fixed.iter().map(Option::is_some).collect();
-        Self { width, height, seen, belief, fixed, tiles }
+        let channels = vec![None; tiles.len()];
+        Self { width, height, seen, belief, fixed, tiles, channels }
     }
 
-    /// Takes the light of each module's neighbours back out of it, tile by
-    /// tile, and decides what is left.
-    fn settle(&mut self) {
+    /// Takes the light of each module's neighbours back out of it, and
+    /// decides what is left, in the tiles named.
+    ///
+    /// Once through: the channel of each tile is measured from what its
+    /// modules are believed to be, and they are believed afresh. A second time
+    /// through measures the channel from better beliefs, and is for the tiles
+    /// the first was not enough for.
+    fn settle(&mut self, tiles: &[usize]) {
         let padded = self.width + 2;
-        for _ in 0..ROUNDS {
-            let decided: Vec<f32> = self
-                .belief
-                .iter()
-                .map(|&value| {
-                    if value > 0.0 {
-                        1.0
-                    } else if value < 0.0 {
-                        -1.0
-                    } else {
-                        0.0
-                    }
-                })
-                .collect();
-            let channels: Vec<Option<Channel>> = self
-                .tiles
-                .iter()
-                .map(|(rows, cols)| {
-                    fit_channel(&self.seen, &decided, self.width, rows.clone(), cols.clone())
-                        // A module none of whose own light reaches its own
-                        // middle cannot be read, whatever else is known.
-                        .filter(|channel| channel.taps[4] > 0.05)
-                })
-                .collect();
+        let decided: Vec<f32> = self
+            .belief
+            .iter()
+            .map(|&value| {
+                if value > 0.0 {
+                    1.0
+                } else if value < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let channels: Vec<(usize, Channel)> = tiles
+            .iter()
+            .filter_map(|&tile| {
+                let (rows, cols) = self.tiles.get(tile)?;
+                fit_channel(&self.seen, &decided, self.width, rows.clone(), cols.clone())
+                    // A module none of whose own light reaches its own middle
+                    // cannot be read, whatever else is known.
+                    .filter(|channel| channel.taps[4] > 0.05)
+                    .map(|channel| (tile, channel))
+            })
+            .collect();
+        for &tile in tiles {
+            if let Some(slot) = self.channels.get_mut(tile) {
+                *slot = None;
+            }
+        }
+        for (tile, channel) in &channels {
+            self.channels[*tile] = Some(*channel);
+        }
 
-            for _ in 0..SWEEPS {
-                for ((rows, cols), channel) in self.tiles.iter().zip(channels.iter()) {
-                    let Some(channel) = channel else { continue };
-                    let taps = channel.taps;
-                    let own = 1.0 / taps[4];
-                    for row in rows.clone() {
-                        for col in cols.clone() {
-                            if self.fixed[row * self.width + col] {
-                                continue;
-                            }
-                            let at = row * padded + col;
-                            let belief = &self.belief;
-                            let others = taps[0] * belief[at]
-                                + taps[1] * belief[at + 1]
-                                + taps[2] * belief[at + 2]
-                                + taps[3] * belief[at + padded]
-                                + taps[5] * belief[at + padded + 2]
-                                + taps[6] * belief[at + 2 * padded]
-                                + taps[7] * belief[at + 2 * padded + 1]
-                                + taps[8] * belief[at + 2 * padded + 2];
-                            let rest = self.seen[row * self.width + col] - channel.offset - others;
-                            self.belief[at + padded + 1] = (rest * own).clamp(-1.0, 1.0);
+        for _ in 0..SWEEPS {
+            for (tile, channel) in &channels {
+                let (rows, cols) = self.tiles[*tile].clone();
+                let taps = channel.taps;
+                let own = 1.0 / taps[4];
+                for row in rows {
+                    for col in cols.clone() {
+                        if self.fixed[row * self.width + col] {
+                            continue;
                         }
+                        let at = row * padded + col;
+                        let belief = &self.belief;
+                        let others = taps[0] * belief[at]
+                            + taps[1] * belief[at + 1]
+                            + taps[2] * belief[at + 2]
+                            + taps[3] * belief[at + padded]
+                            + taps[5] * belief[at + padded + 2]
+                            + taps[6] * belief[at + 2 * padded]
+                            + taps[7] * belief[at + 2 * padded + 1]
+                            + taps[8] * belief[at + 2 * padded + 2];
+                        let rest = self.seen[row * self.width + col] - channel.offset - others;
+                        self.belief[at + padded + 1] = (rest * own).clamp(-1.0, 1.0);
                     }
                 }
             }
         }
+    }
+
+    /// How far what was seen of a tile is from what its channel makes of
+    /// what its modules were decided to be, on the whole.
+    ///
+    /// A camera's noise, when the tile was on the screen alone. When another
+    /// code was on the screen with it, that code.
+    fn left_over(&self, tile: usize) -> f32 {
+        let Some(channel) = self.channels.get(tile).copied().flatten() else { return 0.0 };
+        let padded = self.width + 2;
+        let (rows, cols) = self.tiles[tile].clone();
+        let count = (rows.len() * cols.len()).max(1);
+
+        let mut total = 0.0f32;
+        for row in rows {
+            for col in cols.clone() {
+                let at = row * padded + col;
+                let mut made = channel.offset;
+                for (tap, weight) in channel.taps.iter().enumerate() {
+                    made += weight * self.belief[at + (tap / 3) * padded + tap % 3].signum();
+                }
+                total += (self.seen[row * self.width + col] - made).abs();
+            }
+        }
+        total / count as f32
+    }
+
+    /// What is believed of one tile's modules, row-major over the tile.
+    fn beliefs_of(&self, tile: usize) -> Vec<f32> {
+        let padded = self.width + 2;
+        let (rows, cols) = self.tiles[tile].clone();
+        rows.flat_map(|row| {
+            let from = (row + 1) * padded + 1 + cols.start;
+            self.belief[from..from + cols.len()].iter().copied()
+        })
+        .collect()
     }
 
     /// Takes out of what was seen whatever a code that is known put there.
@@ -1869,6 +2257,13 @@ const PRESENT: f32 = 0.06;
 /// to be a code in them, as a fraction of the range between dark and light.
 const FAINTEST: f32 = 0.03;
 
+/// How far what was seen of a tile must be from what the code read from it
+/// accounts for, before another code is looked for under it.
+///
+/// Measured: of the tiles another code was read from under, none was nearer
+/// than 0.139, and nine in ten of the rest were.
+const UNDER_AT: f32 = 0.10;
+
 /// What a module's brightness is multiplied by to be kept in a byte.
 const KEPT_SCALE: f32 = 100.0;
 
@@ -1944,34 +2339,19 @@ impl DenseLayout {
             .collect()
     }
 
-    /// Where in its tile's rectangle each of the tile's modules is, in the
-    /// order they are filled.
-    fn places(&self, tile: u32) -> Vec<usize> {
-        let (rows, cols) = self.bounds(tile);
-        let width = self.profile.width() as usize;
-        self.tiles[tile as usize]
-            .iter()
-            .map(|&module| {
-                let (row, col) = (module as usize / width, module as usize % width);
-                (row - rows.start) * cols.len() + col - cols.start
-            })
-            .collect()
-    }
-
     /// Every module of a tile as it was painted, row-major over the tile's
     /// rectangle: one for light, minus one for dark.
     fn painted(&self, tile: &Tile) -> Vec<i8> {
         let index = u32::from(tile.index);
-        let mut modules: Vec<i8> = self
-            .cut(index, &self.fixed)
+        let mut modules: Vec<i8> = self.fixed_in[usize::from(tile.index)]
             .iter()
             .map(|fixed| if *fixed == Some(true) { -1 } else { 1 })
             .collect();
         let raw = self.protect(index, &tile.encode(self.capacity(index)));
-        for (position, place) in self.places(index).into_iter().enumerate() {
+        for (position, &place) in self.places[usize::from(tile.index)].iter().enumerate() {
             let light =
                 raw.get(position / 8).is_some_and(|byte| (byte >> (7 - position % 8)) & 1 == 1);
-            modules[place] = if light { 1 } else { -1 };
+            modules[place as usize] = if light { 1 } else { -1 };
         }
         modules
     }
@@ -1982,8 +2362,8 @@ impl DenseLayout {
         let mut raw = vec![0u8; self.codes[tile as usize].raw];
         // How sure the least sure bit of each byte is.
         let mut sure = vec![f32::INFINITY; raw.len()];
-        for (position, place) in self.places(tile).into_iter().enumerate() {
-            let value = beliefs[place];
+        for (position, &place) in self.places[tile as usize].iter().enumerate() {
+            let value = beliefs[place as usize];
             if let Some(byte) = raw.get_mut(position / 8) {
                 if value > 0.0 {
                     *byte |= 1 << (7 - position % 8);
@@ -2014,7 +2394,7 @@ impl DenseLayout {
             cols.len(),
             rows.len(),
             seen,
-            &self.cut(index, &self.fixed),
+            &self.fixed_in[index as usize],
             0.0,
             vec![(0..rows.len(), 0..cols.len())],
         );
@@ -2030,8 +2410,10 @@ impl DenseLayout {
         if region.restart() < FAINTEST {
             return None;
         }
-        region.settle();
-        self.read_tile(index, &region.beliefs()).map(|(tile, _)| tile)
+        (0..ROUNDS).find_map(|_| {
+            region.settle(&[0]);
+            self.read_tile(index, &region.beliefs()).map(|(tile, _)| tile)
+        })
     }
 }
 
@@ -2506,7 +2888,6 @@ mod tests {
         // to the next, all but the number of the code, and what two codes have
         // in common cannot be taken out of one and left in the other.
         assert_eq!(reading.tiles.iter().filter(|tile| tile.code == 1).count(), tiles - 4);
-        assert!(reading.tiles.iter().all(|tile| tile.code == 0 || tile.kind == tile_kind::SYMBOL));
     }
 
     #[test]
@@ -2535,6 +2916,33 @@ mod tests {
             let again: usize = reports.iter().map(|report| report.tiles_read_again).sum();
             assert_eq!(again, profile.tiles() as usize - 4, "known first: {known_first}");
         }
+    }
+
+    #[test]
+    fn a_reading_survives_being_packed() {
+        let profile = &DENSE_PROFILES[0];
+        let mut sender =
+            DenseTransmitter::new("f.bin", &noise(30_000), profile, 3).expect("prepared");
+        let first = sender.next_frame(3);
+        let second = sender.next_frame(3);
+        let reader = DenseReader::new();
+
+        for picture in [first.clone(), blended(&first, &second, 0.5)] {
+            let reading = reader.read(&picture);
+            let packed = reading.to_bytes();
+            let back = DenseReading::from_bytes(&packed).expect("unpacked");
+            assert_eq!(back.tiles, reading.tiles);
+            assert_eq!(back.unread, reading.unread);
+            assert_eq!(back.profile, reading.profile);
+            assert_eq!(back.tiles_lost, reading.tiles_lost);
+            assert!(back.corners.is_some());
+
+            // Cut short anywhere, it is refused rather than read past.
+            for length in [0, 1, 5, packed.len() / 2, packed.len() - 1] {
+                assert!(DenseReading::from_bytes(&packed[..length]).is_none(), "{length}");
+            }
+        }
+        assert!(DenseReading::from_bytes(&[0x00; 64]).is_none());
     }
 
     #[test]
