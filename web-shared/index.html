@@ -2,84 +2,132 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<link rel="icon" href="data:,">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PhotonProtocol</title>
-<meta name="description" content="Move a file from one phone to another with nothing but a screen and a camera.">
+<meta name="description" content="Move a file from one device to another with nothing but a screen and a camera.">
 <link rel="stylesheet" href="shared/style.css">
 </head>
 <body>
 
 <h1>PhotonProtocol</h1>
-<p class="tagline">
+<p class="tagline" data-i18n="tagline">
   Move a file from one device to another with nothing but a screen and a camera.
   No network, no cable, no pairing, no account, no server.
 </p>
 
-<fieldset>
-  <legend>Sending</legend>
-  <p>
-    Open <a href="emit/">the sender</a> on the device that has the file. It
-    paints the file as a sequence of dense visual codes.
-  </p>
-  <p class="note">
-    Turn the brightness up, turn off adaptive brightness and any night or
-    warmth filter, and let it run full screen.
-  </p>
-</fieldset>
+<div class="row">
+  <a class="button" href="emit/" data-i18n="send">Send a file</a>
+  <a class="button" href="decode/" data-i18n="receive">Receive a file</a>
+</div>
 
-<fieldset>
-  <legend>Receiving</legend>
-  <p>
-    Film that screen with the other device, using its ordinary camera app, at
-    the highest resolution it offers. Then open
-    <a href="decode/">the receiver</a> and give it the recording.
-  </p>
-  <p class="note">
-    Fill as much of the frame with the screen as you can, hold reasonably still,
-    and keep recording for a few seconds longer than you think you need. Frames
-    lost to blur or glare cost time, never correctness.
-  </p>
-</fieldset>
+<h2 data-i18n="howHeading">How to use it</h2>
+<ol>
+  <li data-i18n="how1">On the device that has the file, open “Send a file”, choose the file and start. The screen fills with a code that keeps changing.</li>
+  <li data-i18n="how2">On the other device, open “Receive a file” and start the camera.</li>
+  <li data-i18n="how3">Point the camera at the code and get close, until the code fills the width of the picture. An outline shows when it has been found.</li>
+  <li data-i18n="how4">Hold it there. When the whole file has arrived it is offered by itself.</li>
+</ol>
 
-<h2>What this is</h2>
-<p>
+<h2 data-i18n="whatHeading">What this is</h2>
+<p data-i18n="what1">
   An open protocol for optical file transfer, and a reference implementation of
   it. Both pages run entirely on your device: nothing is uploaded, because there
   is nowhere to upload it to. After the first load they work offline.
 </p>
-<p>
+<p data-i18n="what2">
   The channel is one-way. The sender never learns whether anyone is watching, so
   it does not transmit the file once — it transmits an endless stream of
   fountain-coded fragments, and any sufficiently large subset rebuilds the whole.
-  Film for as long as it takes.
+  A picture lost to blur or glare costs time, never correctness.
 </p>
 
-<h2>Before you send anything sensitive</h2>
-<p>
+<h2 data-i18n="secretHeading">Before you send anything sensitive</h2>
+<p data-i18n="secret">
   The channel is a screen in a room. Anyone who can see it can record it, and
-  anyone who records it can decode it — that is the design, not a defect.
-  PhotonProtocol gives you <strong>integrity, not confidentiality</strong>.
-  Encrypt anything private before handing it over.
+  anyone who records it can decode it — that is the design, not a defect. You
+  get integrity, not confidentiality. Encrypt anything private before handing
+  it over.
 </p>
 
-<h2>Status</h2>
-<p id="versions" class="note">Loading…</p>
+<h2 data-i18n="statusHeading">Status</h2>
+<p id="versions" class="note">…</p>
 <p class="note">
-  The wire format is a draft and may change. Two copies of these pages from
-  different days are not guaranteed to understand each other.
-  <a href="https://github.com/IMNascimento/PhotonProtocol">Source and specification</a>.
+  <span data-i18n="draft">The wire format is a draft and may change. Two copies of these pages from different days are not guaranteed to understand each other.</span>
+  <a href="https://github.com/IMNascimento/PhotonProtocol" data-i18n="source">Source and specification</a>.
 </p>
 
 <script type="module">
   import init, { protocolVersion, specVersion } from './photon/photon_wasm.js';
+  import { translator, translatePage } from './shared/i18n.js';
+
+  const t = translator({
+    tagline: {
+      en: 'Move a file from one device to another with nothing but a screen and a camera. No network, no cable, no pairing, no account, no server.',
+      pt: 'Passe um arquivo de um aparelho para outro usando só uma tela e uma câmera. Sem rede, sem cabo, sem pareamento, sem conta, sem servidor.',
+    },
+    send: { en: 'Send a file', pt: 'Enviar um arquivo' },
+    receive: { en: 'Receive a file', pt: 'Receber um arquivo' },
+    howHeading: { en: 'How to use it', pt: 'Como usar' },
+    how1: {
+      en: 'On the device that has the file, open “Send a file”, choose the file and start. The screen fills with a code that keeps changing.',
+      pt: 'No aparelho que tem o arquivo, abra “Enviar um arquivo”, escolha o arquivo e comece. A tela se enche com um código que fica mudando.',
+    },
+    how2: {
+      en: 'On the other device, open “Receive a file” and start the camera.',
+      pt: 'No outro aparelho, abra “Receber um arquivo” e ligue a câmera.',
+    },
+    how3: {
+      en: 'Point the camera at the code and get close, until the code fills the width of the picture. An outline shows when it has been found.',
+      pt: 'Aponte a câmera para o código e chegue perto, até o código ocupar a largura da imagem. Um contorno aparece quando ele é encontrado.',
+    },
+    how4: {
+      en: 'Hold it there. When the whole file has arrived it is offered by itself.',
+      pt: 'Segure assim. Quando o arquivo inteiro tiver chegado, ele aparece sozinho.',
+    },
+    whatHeading: { en: 'What this is', pt: 'O que é isto' },
+    what1: {
+      en: 'An open protocol for optical file transfer, and a reference implementation of it. Both pages run entirely on your device: nothing is uploaded, because there is nowhere to upload it to. After the first load they work offline.',
+      pt: 'Um protocolo aberto de transferência óptica de arquivos, e a implementação de referência dele. As duas páginas rodam inteiramente no seu aparelho: nada é enviado para a internet, porque não existe para onde enviar. Depois do primeiro carregamento elas funcionam offline.',
+    },
+    what2: {
+      en: 'The channel is one-way. The sender never learns whether anyone is watching, so it does not transmit the file once — it transmits an endless stream of fountain-coded fragments, and any sufficiently large subset rebuilds the whole. A picture lost to blur or glare costs time, never correctness.',
+      pt: 'O canal é de mão única. O emissor nunca sabe se alguém está olhando, então ele não transmite o arquivo uma vez — transmite um fluxo infinito de fragmentos em código-fonte (fountain code), e qualquer subconjunto grande o bastante reconstrói o todo. Uma imagem perdida por borrão ou reflexo custa tempo, nunca correção.',
+    },
+    secretHeading: {
+      en: 'Before you send anything sensitive',
+      pt: 'Antes de enviar algo sigiloso',
+    },
+    secret: {
+      en: 'The channel is a screen in a room. Anyone who can see it can record it, and anyone who records it can decode it — that is the design, not a defect. You get integrity, not confidentiality. Encrypt anything private before handing it over.',
+      pt: 'O canal é uma tela numa sala. Quem consegue ver, consegue gravar; e quem grava, consegue decodificar — isso é o projeto, não um defeito. Você tem integridade, não sigilo. Criptografe o que for privado antes de enviar.',
+    },
+    statusHeading: { en: 'Status', pt: 'Situação' },
+    draft: {
+      en: 'The wire format is a draft and may change. Two copies of these pages from different days are not guaranteed to understand each other.',
+      pt: 'O formato é um rascunho e pode mudar. Duas cópias destas páginas, de dias diferentes, podem não se entender.',
+    },
+    source: { en: 'Source and specification', pt: 'Código e especificação' },
+    versions: {
+      en: 'Protocol version {protocol}, specification {spec} (draft).',
+      pt: 'Versão {protocol} do protocolo, especificação {spec} (rascunho).',
+    },
+    failed: {
+      en: 'The protocol module failed to load: {error}',
+      pt: 'O módulo do protocolo não carregou: {error}',
+    },
+  });
+
+  translatePage(t);
 
   try {
     await init();
-    document.getElementById('versions').textContent =
-      `Protocol version ${protocolVersion()}, specification ${specVersion()} (draft).`;
+    document.getElementById('versions').textContent = t('versions', {
+      protocol: protocolVersion(),
+      spec: specVersion(),
+    });
   } catch (error) {
-    document.getElementById('versions').textContent =
-      `The protocol module failed to load: ${error}`;
+    document.getElementById('versions').textContent = t('failed', { error: String(error) });
   }
 </script>
 
