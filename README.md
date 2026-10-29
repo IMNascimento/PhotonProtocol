@@ -313,6 +313,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Two rules matter more than the rest:
   `SPEC.md` §12 are open because they should be settled by measurement, and an
   argument is not a measurement.
 
+Looking for something to build? [`docs/help-wanted.md`](docs/help-wanted.md)
+lists the features the project wants and has not built, each written out with
+the problem in numbers, what exists already, what done looks like and where
+the code goes. The first is shrinking a photo before sending it: a 3 MB camera
+photo takes two minutes on a real phone today, and no lossless compression
+can change that.
+
 ## Security
 
 The channel is a screen in a room. Anyone who can see it can record it, and

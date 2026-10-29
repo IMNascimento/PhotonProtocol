@@ -318,6 +318,13 @@ Veja [CONTRIBUTING.md](CONTRIBUTING.md). Duas regras valem mais que as outras:
   aberto do `SPEC.md` §12 estão abertas porque devem ser resolvidas por medição,
   e argumento não é medição.
 
+Procurando algo para construir? [`docs/help-wanted.md`](docs/help-wanted.md)
+lista as funcionalidades que o projeto quer e ainda não construiu, cada uma
+escrita com o problema em números, o que já existe, como é o "pronto" e onde
+o código entra. A primeira é reduzir uma foto antes de enviar: uma foto de
+3 MB da câmera leva dois minutos num celular de verdade hoje, e nenhuma
+compressão sem perdas muda isso.
+
 ## Segurança
 
 O canal é uma tela numa sala. Quem consegue ver, consegue gravar; quem grava,
