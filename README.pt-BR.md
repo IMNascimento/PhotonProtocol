@@ -207,19 +207,62 @@ node tools/build-site.mjs site
 
 ## Testando entre um computador e um celular
 
-O navegador só libera a câmera para páginas abertas por HTTPS, então as
-páginas precisam ser servidas assim mesmo numa rede doméstica:
+O computador mostra o código e o celular filma. Os dois precisam estar na
+mesma rede Wi-Fi, e as páginas precisam ser servidas por HTTPS mesmo em casa:
+o navegador só libera a câmera para uma página que carregou de forma segura.
+`localhost` é exceção a essa regra, por isso o emissor pode ser simples no
+computador, mas o celular não é `localhost`.
 
-```bash
-node tools/serve.mjs
-```
+1. Compile o site uma vez. Precisa de Node, `wasm-pack` e `openssl` (veja
+   [Compilando](#compilando)); recompile depois de mudar qualquer coisa em
+   `web-*` ou `wasm/`, porque o servidor só serve o que está em `site/`.
 
-Ele imprime dois endereços. Abra o emissor no computador e o receptor no
-celular, que precisa estar na mesma rede. Os dois navegadores avisam uma vez
-sobre o certificado, que é autoassinado; escolha continuar. Com `?capture` no
-endereço, como impresso, as duas páginas relatam no terminal o que estão
-medindo, e o receptor envia para `./captures` as imagens que não conseguiu ler
-— que é o que se anexa a um relato de problema.
+   ```bash
+   wasm-pack build wasm --release --target web --out-dir pkg
+   node tools/build-site.mjs site
+   ```
+
+2. Sirva o site para a rede. Na primeira execução o script gera um certificado
+   autoassinado com `openssl`; sem `openssl` ele cai para HTTP simples, que
+   funciona no computador e deixa o celular sem câmera.
+
+   ```bash
+   node tools/serve.mjs        # porta 8443, ou passe outra como argumento
+   ```
+
+   Ele imprime os dois endereços a abrir, um para cada aparelho:
+
+   ```
+   https://localhost:8443/emit/?capture         o emissor, neste computador
+   https://192.168.x.x:8443/decode/?capture     o receptor, no celular
+   ```
+
+3. No computador, abra o endereço do emissor, escolha um arquivo e aperte
+   **Começar a enviar**. A tela se enche com o código mudando. Brilho no
+   máximo, zoom do navegador em 100%, luz noturna desligada.
+
+4. No celular, abra o endereço do receptor. O navegador avisa uma vez que o
+   certificado é autoassinado; escolha continuar. Aperte **Ligar a câmera** e
+   aponte para a tela do computador, de frente e perto o bastante para o
+   código ocupar a largura da imagem. A barra enche conforme os blocos chegam,
+   e o arquivo é oferecido para download quando estiver completo. O emissor
+   continua até ser parado.
+
+Se o celular não abrir o endereço de jeito nenhum, quase sempre é uma de três
+coisas: o celular está em dados móveis em vez do mesmo Wi-Fi; o firewall do
+computador recusa conexões de entrada na porta; ou a rede isola os clientes
+uns dos outros, o que alguns roteadores e a maioria das redes de visitante
+fazem.
+
+O painel **Ajustes** do emissor escolhe a taxa de códigos e a densidade.
+`P1-conservative` é o perfil que comprovadamente funciona num celular de
+verdade. Os perfis densos `D1`–`D3` desta branch até agora só foram provados
+pela câmera simulada (veja [Situação atual](#situação-atual)).
+
+Com `?capture` no endereço, como impresso, as duas páginas relatam no terminal
+o que estão medindo, e o receptor envia para `./captures` as imagens que não
+conseguiu ler — que é o que se anexa a um relato de problema. Sem `?capture`,
+nada sai de nenhum dos aparelhos.
 
 ## Testando sem celular
 
@@ -233,6 +276,10 @@ node tools/e2e/matrix.mjs foto.jpg
 # A página receptora de verdade, no Chrome, com filmagem simulada como câmera.
 target/release/photon film foto.jpg --out filmado --y4m --no-png --seconds 12 --hold 6
 node tools/e2e/receive.mjs filmado/camera.y4m foto.jpg --throttle 4
+
+# O mesmo com um código denso, mudando trinta vezes por segundo.
+target/release/photon film foto.jpg --out denso --profile d3 --hold 2 --fill 0.88 --y4m --no-png --seconds 8
+node tools/e2e/receive.mjs denso/camera.y4m foto.jpg
 
 # A página emissora de verdade, fotografada pixel a pixel e decodificada.
 node tools/e2e/send.mjs foto.jpg enviado

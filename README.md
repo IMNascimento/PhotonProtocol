@@ -204,19 +204,61 @@ node tools/build-site.mjs site
 
 ## Trying it between a computer and a phone
 
-A browser only offers the camera to a page loaded over HTTPS, so the pages have
-to be served that way even on a home network:
+The computer shows the code and the phone films it. The two have to be on the
+same Wi-Fi network, and the pages have to be served over HTTPS even at home: a
+browser only offers the camera to a page it loaded securely. `localhost` is
+exempt from that rule, which is why the sender can be plain on the computer,
+but the phone is not `localhost`.
 
-```bash
-node tools/serve.mjs
-```
+1. Build the site once. It needs Node, `wasm-pack` and `openssl` (see
+   [Building](#building)); rebuild it after changing anything under `web-*`
+   or `wasm/`, because the server serves only what `site/` holds.
 
-It prints two addresses. Open the sender on the computer and the receiver on
-the phone, which has to be on the same network. Both browsers warn once about
-the certificate, which is self-signed; continue past it. With `?capture` in the
-address, as printed, both pages report what they measure to the terminal and
-the receiver sends the pictures it could not read to `./captures` — which is
-what to attach to a bug report.
+   ```bash
+   wasm-pack build wasm --release --target web --out-dir pkg
+   node tools/build-site.mjs site
+   ```
+
+2. Serve it to the network. The first run makes a self-signed certificate
+   with `openssl`; without `openssl` the script falls back to plain HTTP, which
+   works on the computer and leaves the phone without a camera.
+
+   ```bash
+   node tools/serve.mjs        # port 8443, or give another as the argument
+   ```
+
+   It prints the two addresses to open, one for each device:
+
+   ```
+   https://localhost:8443/emit/?capture         the sender, on this computer
+   https://192.168.x.x:8443/decode/?capture     the receiver, on the phone
+   ```
+
+3. On the computer, open the sender address, choose a file and press
+   **Start sending**. The screen fills with the changing code. Brightness to
+   maximum, browser zoom at 100%, night light off.
+
+4. On the phone, open the receiver address. The browser warns once that the
+   certificate is self-signed; choose to continue. Press **Start the camera**
+   and point it at the computer's screen, square on and close enough for the
+   code to fill the width of the picture. The bar fills as blocks arrive, and
+   the file is offered for download when it is complete. The sender keeps
+   going until it is stopped.
+
+If the phone cannot open the address at all, it is almost always one of three
+things: the phone is on mobile data rather than the same Wi-Fi; the computer's
+firewall refuses incoming connections on the port; or the network isolates its
+clients from each other, which some routers and most guest networks do.
+
+The sender's **Settings** panel chooses the code rate and the density.
+`P1-conservative` is the profile that has been shown to work on a real phone.
+The dense profiles `D1`–`D3` on this branch have only been proven through the
+simulated camera so far (see [Status](#status)).
+
+With `?capture` in the address, as printed, both pages report what they measure
+to the terminal and the receiver sends the pictures it could not read to
+`./captures` — which is what to attach to a bug report. Leave `?capture` off
+and nothing leaves either device.
 
 ## Testing without a phone
 
