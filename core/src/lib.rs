@@ -35,6 +35,7 @@
 //! rewritten against a format that moved underneath it.
 
 pub mod codec;
+pub mod dense;
 pub mod detect;
 pub mod error;
 pub mod fec;
@@ -75,7 +76,7 @@ pub const FRAME_MAGIC: [u8; 4] = *b"PHTN";
 pub const MANIFEST_MAGIC: [u8; 4] = *b"PHTM";
 
 /// Version of the specification document this crate was written against.
-pub const SPEC_VERSION: &str = "0.2";
+pub const SPEC_VERSION: &str = "0.3";
 
 #[cfg(test)]
 mod tests {

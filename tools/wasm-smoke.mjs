@@ -93,6 +93,61 @@ check(receiver.fileName() === 'smoke.txt', 'the receiver learned the file name')
 const recovered = Buffer.from(receiver.finish());
 check(recovered.equals(source), 'the recovered bytes are the bytes that went in');
 
+console.log('round trip through the dense bindings');
+
+const denseProfiles = JSON.parse(photon.denseProfiles());
+check(Array.isArray(denseProfiles) && denseProfiles.length === 3, 'three dense profiles are described');
+check(
+  denseProfiles.every((p) => p.width > p.height && p.tiles > 0 && p.payloadCapacity > 0),
+  'every dense profile carries usable geometry',
+);
+
+{
+  const dense = denseProfiles[1];
+  const sender = new photon.DenseEmitter('smoke.bin', source, dense.id, 0x0badc0de);
+  const [wide, tall] = [sender.width(), sender.height()];
+  check(wide === dense.width + 2 * dense.quiet, 'a dense frame is as wide as its modules and margin');
+
+  // The page scales what it is given by a whole number, without smoothing.
+  const scale = 3;
+  const enlarge = (small) => {
+    const large = new Uint8Array(wide * scale * tall * scale * 4);
+    for (let y = 0; y < tall * scale; y += 1) {
+      for (let x = 0; x < wide * scale; x += 1) {
+        const from = (Math.floor(y / scale) * wide + Math.floor(x / scale)) * 4;
+        large.set(small.subarray(from, from + 4), (y * wide * scale + x) * 4);
+      }
+    }
+    return large;
+  };
+
+  const reader = new photon.DenseReader();
+  const collector = new photon.DenseReceiver();
+  let pictures = 0;
+  let located = 0;
+  while (!collector.isComplete() && pictures < 20) {
+    const small = sender.nextFrame();
+    if (pictures === 0) check(small.length === wide * tall * 4, 'a dense frame is RGBA, a pixel to a module');
+    const reading = reader.read(enlarge(small), wide * scale, tall * scale);
+    if (JSON.parse(reader.summary()).located) located += 1;
+    collector.absorb(reading);
+    pictures += 1;
+  }
+
+  check(collector.isComplete(), `the dense transfer completed in ${pictures} frames`);
+  check(located === pictures, 'every dense frame was located');
+  check(collector.fileName() === 'smoke.bin', 'the dense receiver learned the file name');
+  check(Buffer.from(collector.finish()).equals(source), 'the recovered bytes are the bytes that went in');
+
+  let denseRefused = false;
+  try {
+    new photon.DenseEmitter('smoke.bin', source, profile.id, 1);
+  } catch {
+    denseRefused = true;
+  }
+  check(denseRefused, 'a profile of cells is refused by the dense emitter');
+}
+
 console.log('rejecting bad input');
 let refused = false;
 try {

@@ -402,6 +402,121 @@ impl Classifier {
         Self { alphabet, templates: weighted, energies, weights, gain, black }
     }
 
+    /// Fits a classifier to the payload itself, with the ring only to start it.
+    ///
+    /// Through a real camera the calibration ring does not look like the
+    /// payload. Its cells have the white of the timing ring and the quiet zone
+    /// beside them, and a camera blurs colour far more than it blurs
+    /// brightness, so the ring's inks arrive washed towards white: a red that
+    /// is `(0.66, 0.46, 0.43)` in the payload is `(0.74, 0.58, 0.56)` in the
+    /// ring. Templates taken from the ring then read four payload cells in ten
+    /// wrongly, and a second fit to a reading that poor does not recover.
+    ///
+    /// The payload can be labelled without templates, because the two halves of
+    /// a cell's value are of different kinds.
+    ///
+    /// The *shape* is whichever mask has its painted sub-cells brightest against
+    /// its unpainted ones. That needs no reference but the cell itself, and a
+    /// camera keeps brightness sharp: it is right for 98 cells in 100 where the
+    /// ring's templates were right for 60.
+    ///
+    /// The *colour* is then the direction of painted-less-unpainted — the
+    /// difference within one cell, which takes out the stray light and much of
+    /// what the neighbours spill, since they spill into both halves. The
+    /// directions fall into as many clusters as there are inks, found from
+    /// where the ring puts them.
+    ///
+    /// Templates are then measured from the payload under those labels. The
+    /// ring, `labelled`, is only where the search for the clusters starts, and
+    /// may be empty.
+    #[must_use]
+    pub fn from_payload(
+        alphabet: Alphabet,
+        samples: &[CellSample],
+        labelled: &[(u16, CellSample)],
+    ) -> Self {
+        let inks = alphabet.colours.len();
+
+        // Where the ring puts each ink, as a direction; the palette's own
+        // where the ring has nothing to say.
+        let mut centres: Vec<[f32; 3]> = alphabet
+            .colours
+            .iter()
+            .map(|c| unit([f32::from(c.r), f32::from(c.g), f32::from(c.b)]))
+            .collect();
+        let mut from_ring = vec![[0.0f32; 3]; inks];
+        for (value, sample) in labelled {
+            let (colour, shape) = alphabet.split(*value);
+            let (Some(&mask), Some(slot)) = (alphabet.shapes.get(shape), from_ring.get_mut(colour))
+            else {
+                continue;
+            };
+            let difference = unit(painted_less_unpainted(sample, mask));
+            for (total, part) in slot.iter_mut().zip(difference.iter()) {
+                *total += part;
+            }
+        }
+        for (centre, seen) in centres.iter_mut().zip(from_ring.iter()) {
+            if seen.iter().any(|v| v.abs() > f32::EPSILON) {
+                *centre = unit(*seen);
+            }
+        }
+
+        let guesses: Vec<(usize, [f32; 3])> = samples
+            .iter()
+            .map(|sample| {
+                let mut best = (0usize, f32::NEG_INFINITY, [0.0f32; 3]);
+                for (index, &mask) in alphabet.shapes.iter().enumerate() {
+                    let difference = painted_less_unpainted(sample, mask);
+                    // By the brightest channel, so that an ink with little in
+                    // one channel is judged by the one it has most in.
+                    let score = difference[0].max(difference[1]).max(difference[2]);
+                    if score > best.1 {
+                        best = (index, score, difference);
+                    }
+                }
+                (best.0, unit(best.2))
+            })
+            .collect();
+
+        let nearest = |centres: &[[f32; 3]], direction: &[f32; 3]| -> usize {
+            let mut best = (0usize, f32::NEG_INFINITY);
+            for (index, centre) in centres.iter().enumerate() {
+                let along =
+                    direction[0] * centre[0] + direction[1] * centre[1] + direction[2] * centre[2];
+                if along > best.1 {
+                    best = (index, along);
+                }
+            }
+            best.0
+        };
+
+        for _ in 0..CLUSTER_ROUNDS {
+            let mut sums = vec![[0.0f32; 3]; inks];
+            for (_, direction) in &guesses {
+                let slot = &mut sums[nearest(&centres, direction)];
+                for (total, part) in slot.iter_mut().zip(direction.iter()) {
+                    *total += part;
+                }
+            }
+            for (centre, sum) in centres.iter_mut().zip(sums.iter()) {
+                if sum.iter().any(|v| v.abs() > f32::EPSILON) {
+                    *centre = unit(*sum);
+                }
+            }
+        }
+
+        let labels: Vec<(u16, CellSample)> = guesses
+            .iter()
+            .zip(samples.iter())
+            .map(|((shape, direction), sample)| {
+                (alphabet.join(nearest(&centres, direction), *shape), *sample)
+            })
+            .collect();
+
+        Self::fit(alphabet, &labels)
+    }
+
     /// Fits again, to the frame's own payload.
     ///
     /// The calibration ring is a few hundred cells at the edge of the frame,
@@ -615,6 +730,41 @@ fn dot_lanes(a: &[f32; TEMPLATE_LEN], b: &[f32; TEMPLATE_LEN]) -> f32 {
         }
     }
     lanes.iter().sum()
+}
+
+/// Rounds of the search for the inks' directions. It settles in three or four.
+const CLUSTER_ROUNDS: usize = 6;
+
+/// A colour difference as a direction.
+#[expect(clippy::suboptimal_flops, reason = "three terms, run once a cell")]
+fn unit(colour: [f32; 3]) -> [f32; 3] {
+    let length =
+        (colour[0] * colour[0] + colour[1] * colour[1] + colour[2] * colour[2]).sqrt().max(1e-6);
+    [colour[0] / length, colour[1] / length, colour[2] / length]
+}
+
+/// The mean of the sub-cells a mask paints, less the mean of those it leaves.
+fn painted_less_unpainted(sample: &CellSample, mask: u16) -> [f32; 3] {
+    let (mut painted, mut unpainted) = ([0.0f32; 3], [0.0f32; 3]);
+    let mut count = 0.0f32;
+    for (sub, colour) in sample.sub.iter().enumerate() {
+        let sum = if (mask >> sub) & 1 == 1 {
+            count += 1.0;
+            &mut painted
+        } else {
+            &mut unpainted
+        };
+        sum[0] += colour.r;
+        sum[1] += colour.g;
+        sum[2] += colour.b;
+    }
+    let rest = (SHAPE_SUBCELLS as f32 - count).max(1.0);
+    let count = count.max(1.0);
+    [
+        painted[0] / count - unpainted[0] / rest,
+        painted[1] / count - unpainted[1] / rest,
+        painted[2] / count - unpainted[2] / rest,
+    ]
 }
 
 /// What a symbol would look like with no camera in the way.

@@ -11,6 +11,10 @@
 //! rather than as mirrored object graphs — every mirrored type is a second
 //! declaration of something the specification already defines once.
 
+use photon_core::dense::{
+    DENSE_PROFILES, DenseLayout, DenseProfile, DenseReader as CoreDenseReader, DenseReading,
+    DenseReceiver as CoreDenseReceiver, DenseTransmitter, QUIET_MODULES,
+};
 use photon_core::detect::Detector;
 use photon_core::session::{
     FrameOpening, FrameOutcome, FrameReading, FrameReport, Receiver as CoreReceiver, Transmitter,
@@ -438,6 +442,272 @@ impl Reader {
     }
 }
 
+/// The dense profiles, as JSON.
+#[wasm_bindgen(js_name = denseProfiles)]
+#[must_use]
+pub fn dense_profiles() -> String {
+    let entries: Vec<String> = DENSE_PROFILES
+        .iter()
+        .map(|profile| {
+            let layout = DenseLayout::new(profile);
+            format!(
+                concat!(
+                    r#"{{"id":{},"name":"{}","width":{},"height":{},"quiet":{},"#,
+                    r#""tiles":{},"symbolSize":{},"payloadCapacity":{}}}"#
+                ),
+                profile.id,
+                profile.name,
+                profile.width(),
+                profile.height(),
+                QUIET_MODULES,
+                profile.tiles(),
+                layout.symbol_size(),
+                layout.bytes_per_frame(),
+            )
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+/// Turns a dense profile number from JavaScript into one the protocol knows.
+fn dense_profile_from(id: u8) -> Result<&'static DenseProfile, String> {
+    DenseProfile::from_id(id).ok_or_else(|| format!("{id:#04x} is not a dense profile"))
+}
+
+/// Paints the endless sequence of dense frames for one file.
+///
+/// A frame is handed over at one pixel to a module, margin included, and the
+/// page scales it up by a whole number. Sixty frames a second of two million
+/// pixels each is more than a page should be copying about, and scaling by a
+/// whole number without smoothing is something a browser does exactly.
+#[wasm_bindgen]
+pub struct DenseEmitter {
+    transmitter: DenseTransmitter,
+    width: u32,
+    height: u32,
+}
+
+#[wasm_bindgen]
+impl DenseEmitter {
+    /// Prepares a transfer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the protocol's own message when the file is empty, the name is
+    /// not a bare file name or is too long, or the profile is not a dense one.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        name: &str,
+        bytes: &[u8],
+        profile: u8,
+        session_id: u32,
+    ) -> Result<DenseEmitter, JsValue> {
+        let profile = dense_profile_from(profile).map_err(to_js)?;
+        let transmitter = DenseTransmitter::new(name, bytes, profile, session_id)
+            .map_err(|e| to_js(e.to_string()))?;
+        Ok(Self {
+            transmitter,
+            width: profile.width() + 2 * QUIET_MODULES,
+            height: profile.height() + 2 * QUIET_MODULES,
+        })
+    }
+
+    /// Width of each frame in modules, margin included.
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Height of each frame in modules, margin included.
+    #[must_use]
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Frames needed to show every source symbol once.
+    #[wasm_bindgen(js_name = framesPerPass)]
+    #[must_use]
+    pub fn frames_per_pass(&self) -> usize {
+        self.transmitter.frames_per_pass()
+    }
+
+    /// What the transfer will tell the receiver about itself, as JSON.
+    #[must_use]
+    pub fn manifest(&self) -> String {
+        let manifest = self.transmitter.manifest();
+        format!(
+            r#"{{"name":"{}","originalSize":{},"compression":"{:?}","bytesPerFrame":{}}}"#,
+            manifest.name.replace('"', "\\\""),
+            manifest.original_size,
+            manifest.compression,
+            self.transmitter.layout().bytes_per_frame(),
+        )
+    }
+
+    /// Paints the next frame and returns it as RGBA, one pixel to a module.
+    #[wasm_bindgen(js_name = nextFrame)]
+    pub fn next_frame(&mut self) -> Vec<u8> {
+        let modules = self.transmitter.next_modules();
+        let (width, height) = (self.width as usize, self.height as usize);
+        let quiet = QUIET_MODULES as usize;
+        let across = width - 2 * quiet;
+
+        let mut rgba = vec![0xFFu8; width * height * 4];
+        for (index, _) in modules.iter().enumerate().filter(|(_, light)| !**light) {
+            let (row, col) = (index / across + quiet, index % across + quiet);
+            let at = (row * width + col) * 4;
+            rgba[at..at + 3].fill(0);
+        }
+        rgba
+    }
+}
+
+/// Reads pictures of dense codes, and keeps nothing.
+#[wasm_bindgen]
+pub struct DenseReader {
+    inner: CoreDenseReader,
+    summary: String,
+}
+
+impl Default for DenseReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[wasm_bindgen]
+impl DenseReader {
+    /// A reader.
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new() -> Self {
+        Self { inner: CoreDenseReader::new(), summary: String::new() }
+    }
+
+    /// Reads a picture.
+    ///
+    /// Returns the reading packed for [`DenseReceiver::absorb`], or nothing if
+    /// there is no dense code in the picture.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message if the buffer does not match the stated dimensions.
+    pub fn read(&mut self, rgba: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, JsValue> {
+        let image = picture_from(rgba, width, height).map_err(to_js)?;
+        let reading = self.inner.read(&image);
+        self.summary = format!(
+            concat!(
+                r#"{{"located":{},"profile":{},"tilesRead":{},"tilesLost":{},"#,
+                r#""pixelsPerCell":{},"correction":{:.2},"corners":{}}}"#
+            ),
+            reading.located,
+            reading.profile.map_or_else(|| "null".to_owned(), |id| id.to_string()),
+            reading.tiles.len(),
+            reading.tiles_lost,
+            number(reading.pixels_per_module),
+            reading.correction,
+            corners_json(reading.corners),
+        );
+        Ok(if reading.located { reading.to_bytes() } else { Vec::new() })
+    }
+
+    /// What the picture last read came to, as JSON.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        self.summary.clone()
+    }
+}
+
+/// Collects the tiles of dense codes until it can rebuild the file.
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct DenseReceiver {
+    inner: CoreDenseReceiver,
+}
+
+#[wasm_bindgen]
+impl DenseReceiver {
+    /// A receiver.
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Folds in a picture that a [`DenseReader`] read, and says as JSON what
+    /// it added.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message if the bytes are not a reading.
+    pub fn absorb(&mut self, reading: &[u8]) -> Result<String, JsValue> {
+        let reading = DenseReading::from_bytes(reading)
+            .ok_or_else(|| to_js("these bytes are not a reading"))?;
+        let report = self.inner.absorb(&reading);
+        let (accepted, needed) = self.inner.progress().unwrap_or((0, 0));
+
+        // In the words the page has for a frame of cells, so that it can count
+        // and explain both the same way.
+        let outcome = if report.new_symbols > 0 {
+            "decoded"
+        } else if report.tiles_foreign > 0 && report.tiles_read == 0 {
+            "wrongSession"
+        } else if report.tiles_read > 0 {
+            "duplicate"
+        } else {
+            "payloadUnrecoverable"
+        };
+        Ok(format!(
+            concat!(
+                r#"{{"outcome":"{}","newSymbols":{},"tilesRead":{},"tilesLost":{},"#,
+                r#""tilesReadAgain":{},"accepted":{},"needed":{},"complete":{}}}"#
+            ),
+            outcome,
+            report.new_symbols,
+            report.tiles_read,
+            report.tiles_lost,
+            report.tiles_read_again,
+            accepted,
+            needed,
+            self.inner.is_complete(),
+        ))
+    }
+
+    /// Whether enough has been collected to rebuild the file.
+    #[wasm_bindgen(js_name = isComplete)]
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.inner.is_complete()
+    }
+
+    /// The declared file name, once a manifest has arrived.
+    #[wasm_bindgen(js_name = fileName)]
+    #[must_use]
+    pub fn file_name(&self) -> Option<String> {
+        self.inner.manifest().map(|m| m.name.clone())
+    }
+
+    /// The declared size of the file in bytes, once a manifest has arrived.
+    #[wasm_bindgen(js_name = fileSize)]
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "exact below 2^53 bytes, which is eight petabytes"
+    )]
+    pub fn file_size(&self) -> Option<f64> {
+        self.inner.manifest().map(|m| m.original_size as f64)
+    }
+
+    /// Rebuilds the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns the specification's own failure code and message.
+    pub fn finish(&mut self) -> Result<Vec<u8>, JsValue> {
+        self.inner.finish().map(|(_, bytes)| bytes).map_err(|e| to_js(format!("{}: {e}", e.code())))
+    }
+}
+
 /// Reports how far detection gets on a picture, as JSON.
 ///
 /// For telling someone why nothing is being read while they can still do
@@ -549,6 +819,60 @@ mod tests {
 
         assert!(receiver.is_complete(), "the transfer never completed");
         assert_eq!(receiver.finish().expect("finished"), file);
+    }
+
+    #[test]
+    fn a_file_survives_the_dense_bindings() {
+        // Bytes that will not compress, so that the transfer is more than a
+        // frame long.
+        let mut state = 0x9E37_79B9u32;
+        let file: Vec<u8> = (0..60_000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state.to_le_bytes()[0]
+            })
+            .collect();
+        let mut emitter = DenseEmitter::new("dense.bin", &file, 0x12, 77).expect("prepared");
+        let (width, height) = (emitter.width(), emitter.height());
+
+        let mut reader = DenseReader::new();
+        let mut receiver = DenseReceiver::new();
+        for _ in 0..40 {
+            if receiver.is_complete() {
+                break;
+            }
+            // Scaled up by three, as the page does.
+            let small = emitter.next_frame();
+            let mut rgba = vec![0u8; (width * 3 * height * 3 * 4) as usize];
+            for y in 0..height * 3 {
+                for x in 0..width * 3 {
+                    let from = ((y / 3 * width + x / 3) * 4) as usize;
+                    let to = ((y * width * 3 + x) * 4) as usize;
+                    rgba[to..to + 4].copy_from_slice(&small[from..from + 4]);
+                }
+            }
+
+            let reading = reader.read(rgba, width * 3, height * 3).expect("read");
+            assert!(reader.summary().contains("\"located\":true"), "{}", reader.summary());
+            let report = receiver.absorb(&reading).expect("absorbed");
+            assert!(report.contains("\"outcome\":\"decoded\""), "{report}");
+        }
+
+        assert!(receiver.is_complete(), "the transfer never completed");
+        assert_eq!(receiver.file_name().as_deref(), Some("dense.bin"));
+        assert_eq!(receiver.finish().expect("finished"), file);
+    }
+
+    #[test]
+    fn dense_profiles_json_is_well_formed() {
+        let json = dense_profiles();
+        assert!(json.starts_with('[') && json.ends_with(']'), "{json}");
+        assert_eq!(json.matches("\"id\":").count(), DENSE_PROFILES.len());
+        assert_eq!(json.matches('{').count(), json.matches('}').count());
+        assert!(dense_profile_from(0x12).is_ok());
+        assert!(dense_profile_from(0x02).is_err());
     }
 
     #[test]

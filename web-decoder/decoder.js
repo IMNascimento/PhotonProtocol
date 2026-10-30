@@ -29,6 +29,11 @@ const t = translator({
   factBlocks: { en: 'Blocks', pt: 'Blocos' },
   factRate: { en: 'Rate', pt: 'Taxa' },
   factPerCell: { en: 'Pixels per cell', pt: 'Pixels por célula' },
+  factTiles: { en: 'Tiles read', pt: 'Blocos lidos' },
+  tiles: {
+    en: '{read} of {seen}, {again} of them from under another code',
+    pt: '{read} de {seen}, {again} deles debaixo de outro código',
+  },
   factSpeed: { en: 'Pictures read', pt: 'Imagens lidas' },
   factUsed: { en: 'New codes', pt: 'Códigos novos' },
   factRepeated: { en: 'Codes seen again', pt: 'Códigos repetidos' },
@@ -42,6 +47,10 @@ const t = translator({
   quality1080: { en: '1080p — recommended', pt: '1080p — recomendado' },
   quality2160: { en: '4K — sharper, slower', pt: '4K — mais nítido, mais lento' },
   quality720: { en: '720p — for a slow phone', pt: '720p — para celular lento' },
+  speedLabel: { en: 'Pictures per second', pt: 'Imagens por segundo' },
+  speed60: { en: '60 if the camera can, else 30', pt: '60 se a câmera conseguir, senão 30' },
+  speed30: { en: '30', pt: '30' },
+  cameraFact: { en: '{width}×{height} at {rate} a second', pt: '{width}×{height} a {rate} por segundo' },
   useRecording: { en: 'Read a recording instead', pt: 'Ler uma gravação em vez da câmera' },
   useCamera: { en: 'Use the camera instead', pt: 'Usar a câmera' },
   recordingLabel: { en: 'A video of the sending screen', pt: 'Um vídeo da tela que envia' },
@@ -150,6 +159,14 @@ const t = translator({
     en: 'The code is found but will not read. Get closer, hold steadier, and move any reflection off the screen.',
     pt: 'O código é encontrado, mas não lê. Chegue mais perto, segure firme e tire qualquer reflexo da tela.',
   },
+  aimCloserDense: {
+    en: 'Too far: only {perCell} camera pixels per module. Turn the phone on its side and move closer, until the code fills the picture.',
+    pt: 'Longe demais: só {perCell} pixels da câmera por módulo. Deite o celular e chegue mais perto, até o código ocupar a imagem inteira.',
+  },
+  aimFewTiles: {
+    en: 'The code is found but few of its tiles read. Move closer, hold steadier, move any reflection off the screen — or choose a sparser density on the sending screen.',
+    pt: 'O código é encontrado, mas poucos blocos são lidos. Chegue mais perto, segure firme, tire qualquer reflexo da tela — ou escolha uma densidade menor na tela que envia.',
+  },
   aimReading: {
     en: 'Reading. Keep the code in the picture; the file is offered by itself when it is complete.',
     pt: 'Lendo. Mantenha o código na imagem; o arquivo aparece sozinho quando estiver completo.',
@@ -177,6 +194,7 @@ const ui = {
   hint: document.getElementById('hint'),
   video: document.getElementById('video'),
   quality: document.getElementById('quality'),
+  speed: document.getElementById('speed'),
   start: document.getElementById('start'),
   stop: document.getElementById('stop'),
   live: document.getElementById('live'),
@@ -196,6 +214,7 @@ const ui = {
     blocks: document.getElementById('fact-blocks'),
     rate: document.getElementById('fact-rate'),
     perCell: document.getElementById('fact-percell'),
+    tiles: document.getElementById('fact-tiles'),
     frames: document.getElementById('fact-frames'),
     used: document.getElementById('fact-used'),
     repeated: document.getElementById('fact-repeated'),
@@ -228,6 +247,10 @@ const MINIMUM_PIXELS_PER_CELL = 5.5;
  * spoilt by something else.
  */
 const COMFORTABLE_PIXELS_PER_CELL = 7;
+
+/** The same two figures for a dense code, in pixels per module. */
+const MINIMUM_PIXELS_PER_MODULE = 2.3;
+const COMFORTABLE_PIXELS_PER_MODULE = 2.8;
 
 /**
  * How much of the picture round the code to read, as a fraction of the code's
@@ -283,6 +306,28 @@ const READERS = (() => {
   const cores = navigator.hardwareConcurrency || 4;
   return Math.min(4, Math.max(1, cores - 2));
 })();
+
+/**
+ * As many as there are cores, for a dense code, of which there is a new one in
+ * every picture and no picture to spare. A phone says it has fewer cores than
+ * it has, and the page is left with little to do once the pictures are copied
+ * out of the video somewhere else.
+ */
+const DENSE_READERS = (() => {
+  const asked = Number(new URLSearchParams(location.search).get('readers'));
+  if (asked >= 1) return READERS;
+  return Math.min(6, Math.max(READERS + 1, navigator.hardwareConcurrency || 4));
+})();
+
+/**
+ * Where a picture is copied out of the video: by a reader, when the browser
+ * can hand one a bitmap, and by this page when it cannot or when the address
+ * says `?grab=page`.
+ */
+const GRAB_IN_READER =
+  new URLSearchParams(location.search).get('grab') !== 'page' &&
+  typeof createImageBitmap === 'function' &&
+  typeof OffscreenCanvas === 'function';
 
 /** Codes recently read that a reader is told not to read again. */
 const REMEMBERED = 96;
@@ -344,6 +389,13 @@ async function start() {
     cellsLost: 0,
     sampled: false,
     perCell: null,
+    // Which format the pictures are of: 'cells', 'dense', or not yet known.
+    kind: 'unknown',
+    tilesRead: 0,
+    tilesSeen: 0,
+    tilesAgain: 0,
+    bitmaps: GRAB_IN_READER,
+    grabbing: false,
     diagnosis: null,
     accepted: 0,
     needed: 0,
@@ -387,7 +439,12 @@ async function start() {
   };
 
   collector = spawn('collector', onCollectorMessage);
-  readers = Array.from({ length: READERS }, () => spawn('reader', onReaderMessage));
+  readers = Array.from({ length: DENSE_READERS }, () => spawn('reader', onReaderMessage));
+}
+
+/** The readers there are to give a picture to, for the format being read. */
+function readersInUse() {
+  return session.kind === 'dense' ? readers : readers.slice(0, READERS);
 }
 
 /** Opens the source once every worker has loaded the protocol. */
@@ -421,12 +478,15 @@ function onReaderMessage(reader, message) {
       reader.busy = false;
       const { summary, region } = message;
 
+      if (summary.kind === 'dense' && summary.located) session.kind = 'dense';
+      else if (summary.outcome === 'opened') session.kind = 'cells';
+
       if (message.reading) {
         // Read as far as it goes here. Whether it decoded, and what it carried,
         // is for the collector to say.
         session.awaiting.set(message.id, { summary, region });
         collector.worker.postMessage(
-          { type: 'absorb', id: message.id, reading: message.reading },
+          { type: 'absorb', id: message.id, reading: message.reading, dense: message.dense },
           [message.reading],
         );
       } else {
@@ -439,6 +499,12 @@ function onReaderMessage(reader, message) {
 
     case 'failed':
       reader.busy = false;
+      if (session.bitmaps && session.used === 0) {
+        // Most likely a browser that says it can hand a bitmap to a worker and
+        // cannot. The page can still copy the pictures out itself.
+        session.bitmaps = false;
+        break;
+      }
       concludeFailure(message.message);
       break;
 
@@ -464,10 +530,15 @@ function onCollectorMessage(entry, message) {
 
       // What the reader measured, with what the collector made of it.
       const report = { ...waiting.summary, ...message.report };
-      if (report.outcome === 'decoded') {
+      if (report.outcome === 'decoded' && waiting.summary.kind !== 'dense') {
         session.locked ??= waiting.summary.session;
         session.decoded.push(report.sequence);
         if (session.decoded.length > REMEMBERED) session.decoded.shift();
+      }
+      if (waiting.summary.kind === 'dense') {
+        session.tilesRead += report.tilesRead;
+        session.tilesSeen += report.tilesRead + report.tilesLost - report.tilesReadAgain;
+        session.tilesAgain += report.tilesReadAgain;
       }
       applyReport(report, waiting.region);
       sendCapture(report);
@@ -559,7 +630,15 @@ function applyReport(report, region) {
     decodeMs: Math.round(session.decodeMs),
     perSecond: Number(session.perSecond.toFixed(1)),
     region: session.region ? `${session.region.w}x${session.region.h}` : '',
-    readers: READERS,
+    readers: readersInUse().length,
+    kind: session.kind,
+    cameraRate: session.cameraRate ?? null,
+    grabInReader: session.bitmaps,
+    tilesRead: session.tilesRead,
+    tilesSeen: session.tilesSeen,
+    tilesAgain: session.tilesAgain,
+    accepted: session.accepted,
+    needed: session.needed,
   };
 }
 
@@ -587,6 +666,13 @@ function render() {
   ui.facts.header.textContent = String(session.headerLost);
   ui.facts.cells.textContent = String(session.cellsLost);
   ui.facts.perCell.textContent = session.perCell === null ? '—' : session.perCell.toFixed(1);
+  if (session.kind === 'dense') {
+    ui.facts.tiles.textContent = t('tiles', {
+      read: session.tilesRead,
+      seen: Math.max(session.tilesSeen, session.tilesRead),
+      again: session.tilesAgain,
+    });
+  }
   ui.facts.times.textContent = t('times', {
     grab: session.grabMs.toFixed(0),
     decode: session.decodeMs.toFixed(0),
@@ -629,7 +715,7 @@ function drawOverlay(report) {
   const context = canvas.getContext('2d');
   context.clearRect(0, 0, width, height);
 
-  const close = session.perCell !== null && session.perCell >= MINIMUM_PIXELS_PER_CELL;
+  const close = session.perCell !== null && session.perCell >= minimumPixels();
   if (!session.corners) {
     ui.hint.textContent = t('hintSearching');
     ui.hint.className = 'viewer-hint';
@@ -658,6 +744,17 @@ function drawOverlay(report) {
  * fix, and because it is the only one they can change by moving.
  */
 function updateAim() {
+  if (session.kind === 'dense') {
+    if (session.perCell !== null && session.perCell < MINIMUM_PIXELS_PER_MODULE) {
+      ui.aim.textContent = t('aimCloserDense', { perCell: session.perCell.toFixed(1) });
+    } else if (session.tilesSeen > 200 && session.tilesRead < session.tilesSeen / 4) {
+      ui.aim.textContent = t('aimFewTiles');
+    } else {
+      ui.aim.textContent = session.used > 0 ? t('aimReading') : '';
+    }
+    return;
+  }
+
   const read = session.used + session.repeated;
   // A picture taken while the screen was changing fails wherever the change
   // happened to fall — at the header, in the cells, or with two headers that
@@ -683,6 +780,11 @@ function updateAim() {
   ui.aim.textContent = session.used > 0 ? t('aimReading') : '';
 }
 
+/** Camera pixels to a cell, or to a module, below which nothing will read. */
+function minimumPixels() {
+  return session.kind === 'dense' ? MINIMUM_PIXELS_PER_MODULE : MINIMUM_PIXELS_PER_CELL;
+}
+
 /**
  * Sends one picture, and what the decoder made of it, to the development
  * server.
@@ -696,7 +798,11 @@ async function sendCapture(report) {
 
   const blob = await session.pending;
   session.pending = null;
-  const fine = report.outcome === 'decoded' || report.outcome === 'duplicate';
+  // Of a dense code every picture is wanted, read or not: what is measured
+  // from them is how many of their modules were read rightly, and the ones
+  // that read are half of that.
+  const fine =
+    session.kind !== 'dense' && (report.outcome === 'decoded' || report.outcome === 'duplicate');
   if (!blob || fine || session.captured >= CAPTURE_LIMIT) return;
 
   session.captured += 1;
@@ -736,7 +842,13 @@ function sendLog(final = null) {
     perSecond: Number(session.perSecond.toFixed(1)),
     grabMs: Math.round(session.grabMs),
     decodeMs: Math.round(session.decodeMs),
-    readers: READERS,
+    readers: readersInUse().length,
+    kind: session.kind,
+    cameraRate: session.cameraRate ?? null,
+    grabInReader: session.bitmaps,
+    tilesRead: session.tilesRead,
+    tilesSeen: session.tilesSeen,
+    tilesAgain: session.tilesAgain,
     frames: session.frames,
     used: session.used,
     repeated: session.repeated,
@@ -774,23 +886,37 @@ async function openCamera() {
   const long = { 720: 1280, 1080: 1920, 2160: 3840 }[ui.quality.value] ?? 1920;
   const short = Number(ui.quality.value) || 1080;
 
-  try {
-    session.stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: 'environment' },
-        width: { ideal: long },
-        height: { ideal: short },
-        frameRate: { ideal: 30 },
-      },
-      audio: false,
-    });
-  } catch (error) {
-    concludeFailure(t('cameraFailed', { error: error?.message ?? String(error) }), true);
+  // Sixty pictures a second where the camera has them, because a dense code
+  // changes as often as the screen does. It has to be demanded: a phone asked
+  // for sixty as an ideal gives thirty and says nothing. A camera that cannot
+  // refuses, and is asked again for what every camera can.
+  const rates = ui.speed.value === '60' ? [{ exact: 60 }, { ideal: 30 }] : [{ ideal: 30 }];
+  let failure = null;
+  for (const frameRate of rates) {
+    try {
+      session.stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: long },
+          height: { ideal: short },
+          frameRate,
+        },
+        audio: false,
+      });
+      failure = null;
+      break;
+    } catch (error) {
+      failure = error;
+    }
+  }
+  if (failure) {
+    concludeFailure(t('cameraFailed', { error: failure?.message ?? String(failure) }), true);
     return;
   }
 
   const track = session.stream.getVideoTracks()[0];
   await sharpen(track);
+  session.cameraRate = Math.round(track.getSettings?.().frameRate ?? 0) || null;
 
   ui.viewer.classList.remove('hidden');
   ui.preview.srcObject = session.stream;
@@ -799,7 +925,9 @@ async function openCamera() {
   const width = ui.preview.videoWidth;
   const height = ui.preview.videoHeight;
   session.size = { width, height };
-  ui.facts.camera.textContent = `${width}×${height}`;
+  ui.facts.camera.textContent = session.cameraRate
+    ? t('cameraFact', { width, height, rate: session.cameraRate })
+    : `${width}×${height}`;
   say(t('cameraOpen', { width, height }));
 
   pump(ui.preview);
@@ -913,8 +1041,8 @@ function regionFor(width, height) {
  * long after the file was already recoverable.
  */
 function grab(element) {
-  if (session.finished) return;
-  const reader = readers.find((candidate) => candidate.ready && !candidate.busy);
+  if (session.finished || session.grabbing) return;
+  const reader = readersInUse().find((candidate) => candidate.ready && !candidate.busy);
   if (!reader) return;
 
   const width = element.videoWidth;
@@ -925,6 +1053,52 @@ function grab(element) {
   const began = performance.now();
   const region = regionFor(width, height);
   session.region = region;
+
+  reader.busy = true;
+  session.frames += 1;
+  const id = session.nextId;
+  session.nextId += 1;
+
+  // Ask for a diagnosis every so often, but only while nothing has worked yet.
+  const diagnose = session.used === 0 && session.frames % 15 === 0;
+  const message = {
+    type: 'frame',
+    id,
+    width: region.w,
+    height: region.h,
+    region,
+    diagnose,
+    kind: session.kind,
+    taken: taken(),
+    session: session.locked,
+  };
+
+  // Pictures are only kept for diagnosis from the page's own copy of them.
+  const keeping =
+    (CAPTURING && session.captured < CAPTURE_LIMIT) ||
+    (!session.sampled && session.used === 0 && session.frames === 45);
+
+  if (session.bitmaps && !keeping) {
+    session.grabbing = true;
+    createImageBitmap(element, region.x, region.y, region.w, region.h)
+      .then((bitmap) => {
+        session.grabbing = false;
+        session.grabMs = smooth(session.grabMs, performance.now() - began);
+        if (!session || session.finished) {
+          bitmap.close();
+          return;
+        }
+        reader.worker.postMessage({ ...message, bitmap }, [bitmap]);
+      })
+      .catch(() => {
+        // Not every browser makes a bitmap of a video. The page can still
+        // copy the pictures out itself.
+        session.grabbing = false;
+        session.bitmaps = false;
+        reader.busy = false;
+      });
+    return;
+  }
 
   if (ui.grabber.width !== region.w || ui.grabber.height !== region.h) {
     ui.grabber.width = region.w;
@@ -946,14 +1120,6 @@ function grab(element) {
     }
   }
 
-  reader.busy = true;
-  session.frames += 1;
-  const id = session.nextId;
-  session.nextId += 1;
-
-  // Ask for a diagnosis every so often, but only while nothing has worked yet.
-  const diagnose = session.used === 0 && session.frames % 15 === 0;
-
   // Keep one picture that failed, exactly as the decoder saw it.
   if (!session.sampled && session.used === 0 && session.frames === 45) {
     session.sampled = true;
@@ -966,20 +1132,7 @@ function grab(element) {
     }, 'image/png');
   }
 
-  reader.worker.postMessage(
-    {
-      type: 'frame',
-      id,
-      buffer,
-      width: region.w,
-      height: region.h,
-      region,
-      diagnose,
-      taken: taken(),
-      session: session.locked,
-    },
-    [buffer],
-  );
+  reader.worker.postMessage({ ...message, buffer }, [buffer]);
 }
 
 /** What kind of file a name says it is, for the ones a browser can show. */

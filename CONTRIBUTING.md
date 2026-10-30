@@ -66,6 +66,13 @@ definition, so a platform-dependent result is a bug, not an inconvenience.
   error is not conforming, and the tests should catch that.
 - Performance claims get a `criterion` benchmark alongside them.
 
+## Looking for something to build
+
+[`docs/help-wanted.md`](docs/help-wanted.md) lists features the project wants
+and has not built, each with the problem in numbers, what exists already, a
+checklist for "done" and where the code goes. Say in an issue which one you are
+taking before you start, so it is not built twice.
+
 ## Proposing a change to the format
 
 Open an issue first, before writing code. Say what the change costs in cells,

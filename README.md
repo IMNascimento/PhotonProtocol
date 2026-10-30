@@ -143,7 +143,7 @@ drafts are not interoperable with each other.
 | 2 | Bench command line, simulated camera, end-to-end browser tests | done against a **simulated** camera; a real one is next |
 | 3 | Sender page | done |
 | 4 | Receiver page, reading live from the camera | done |
-| 5 | Optimisation, driven by measurements | under way, on [`experiment/throughput`](https://github.com/IMNascimento/PhotonProtocol/tree/experiment/throughput) |
+| 5 | Optimisation, driven by measurements | under way: a dense format, simulated, on [`experiment/throughput`](https://github.com/IMNascimento/PhotonProtocol/tree/experiment/throughput) |
 
 **On a real phone.** An iPhone in Safari, pointed by hand at a 1080p monitor,
 received an 818 KB picture with `P1-conservative` at 23.7 KB/s with ten codes
@@ -172,6 +172,28 @@ picture less than a real lens does.
 End to end, through the receiving page in Chrome slowed to a quarter of desktop
 speed to stand in for a phone, a 2.7 MB photograph arrived in 107 seconds with
 its digest verified.
+
+**The dense format.** The branch `experiment/throughput` has a second format,
+made of what the phone showed: black and white only, the shape of the screen,
+read in tiles so that a picture taken as the code changes still yields what it
+caught, with a mark in every tile to measure the grid by. It is
+[`SPEC.md`](SPEC.md) §13 and
+[`docs/phase-3-report.md`](docs/phase-3-report.md).
+
+| Profile | A frame carries | Camera | Codes a second | Throughput, **simulated** |
+| --- | --- | --- | --- | --- |
+| `D1-swift` | 5040 B | 1080p or 720p, on its side | 30 | 150 KB/s |
+| `D2-rapid` | 8800 B | 1080p, on its side | 30 to 60 | 260 to 510 KB/s |
+| `D3-blaze` | 17952 B | 1080p, on its side, close | 30 to 60 | 360 to 890 KB/s |
+
+Through the simulated camera a mebibyte arrives in 2.14 seconds with a camera
+taking thirty pictures a second and in 1.15 with one taking sixty, and through
+the receiving page in Chrome in 2.2.
+[Decimen](https://github.com/bashalarmistalt/decimen-optical-transfer), whose
+record this branch set out to beat, moved one between a monitor and a phone in
+2.45. That is a real monitor and a real phone, and no dense code has been
+through either yet: see [`docs/benchmarks`](docs/benchmarks/README.md) for why
+the two figures are not yet a comparison.
 
 [`docs/phase-2-report.md`](docs/phase-2-report.md) has the measurements and
 what they changed. The short version: the first decoder never decoded a real
@@ -268,19 +290,61 @@ node tools/build-site.mjs site
 
 ## Trying it between a computer and a phone
 
-A browser only offers the camera to a page loaded over HTTPS, so the pages have
-to be served that way even on a home network:
+The computer shows the code and the phone films it. The two have to be on the
+same Wi-Fi network, and the pages have to be served over HTTPS even at home: a
+browser only offers the camera to a page it loaded securely. `localhost` is
+exempt from that rule, which is why the sender can be plain on the computer,
+but the phone is not `localhost`.
 
-```bash
-node tools/serve.mjs
-```
+1. Build the site once. It needs Node, `wasm-pack` and `openssl` (see
+   [Building](#building)); rebuild it after changing anything under `web-*`
+   or `wasm/`, because the server serves only what `site/` holds.
 
-It prints two addresses. Open the sender on the computer and the receiver on
-the phone, which has to be on the same network. Both browsers warn once about
-the certificate, which is self-signed; continue past it. With `?capture` in the
-address, as printed, both pages report what they measure to the terminal and
-the receiver sends the pictures it could not read to `./captures` — which is
-what to attach to a bug report.
+   ```bash
+   wasm-pack build wasm --release --target web --out-dir pkg
+   node tools/build-site.mjs site
+   ```
+
+2. Serve it to the network. The first run makes a self-signed certificate
+   with `openssl`; without `openssl` the script falls back to plain HTTP, which
+   works on the computer and leaves the phone without a camera.
+
+   ```bash
+   node tools/serve.mjs        # port 8443, or give another as the argument
+   ```
+
+   It prints the two addresses to open, one for each device:
+
+   ```
+   https://localhost:8443/emit/?capture         the sender, on this computer
+   https://192.168.x.x:8443/decode/?capture     the receiver, on the phone
+   ```
+
+3. On the computer, open the sender address, choose a file and press
+   **Start sending**. The screen fills with the changing code. Brightness to
+   maximum, browser zoom at 100%, night light off.
+
+4. On the phone, open the receiver address. The browser warns once that the
+   certificate is self-signed; choose to continue. Press **Start the camera**
+   and point it at the computer's screen, square on and close enough for the
+   code to fill the width of the picture. The bar fills as blocks arrive, and
+   the file is offered for download when it is complete. The sender keeps
+   going until it is stopped.
+
+If the phone cannot open the address at all, it is almost always one of three
+things: the phone is on mobile data rather than the same Wi-Fi; the computer's
+firewall refuses incoming connections on the port; or the network isolates its
+clients from each other, which some routers and most guest networks do.
+
+The sender's **Settings** panel chooses the code rate and the density.
+`P1-conservative` is the profile that has been shown to work on a real phone.
+The dense profiles `D1`–`D3` on this branch have only been proven through the
+simulated camera so far (see [Status](#status)).
+
+With `?capture` in the address, as printed, both pages report what they measure
+to the terminal and the receiver sends the pictures it could not read to
+`./captures` — which is what to attach to a bug report. Leave `?capture` off
+and nothing leaves either device.
 
 ## Testing without a phone
 
@@ -294,6 +358,10 @@ node tools/e2e/matrix.mjs photo.jpg
 # The real receiving page, in Chrome, with simulated footage as its camera.
 target/release/photon film photo.jpg --out filmed --y4m --no-png --seconds 12 --hold 6
 node tools/e2e/receive.mjs filmed/camera.y4m photo.jpg --throttle 4
+
+# The same with a dense code, changing thirty times a second.
+target/release/photon film photo.jpg --out dense --profile d3 --hold 2 --fill 0.88 --y4m --no-png --seconds 8
+node tools/e2e/receive.mjs dense/camera.y4m photo.jpg
 
 # The real sending page, photographed pixel for pixel and decoded.
 node tools/e2e/send.mjs photo.jpg sent
@@ -330,6 +398,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Two rules matter more than the rest:
 - **No optimisation without a benchmark showing the gain.** The open questions in
   `SPEC.md` §12 are open because they should be settled by measurement, and an
   argument is not a measurement.
+
+Looking for something to build? [`docs/help-wanted.md`](docs/help-wanted.md)
+lists the features the project wants and has not built, each written out with
+the problem in numbers, what exists already, what done looks like and where
+the code goes. The first is shrinking a photo before sending it: a 3 MB camera
+photo takes two minutes on a real phone today, and no lossless compression
+can change that.
 
 ## Security
 

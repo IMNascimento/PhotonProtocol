@@ -61,7 +61,11 @@ function argumentsFor(extra) {
   return Object.entries(merged).flat();
 }
 
-/** name, arguments, and the fewest codes a second that counts as working. */
+/**
+ * name, arguments, and the least that counts as working: codes a second for a
+ * code of cells, and kilobytes a second for a dense one, of which a picture
+ * yields tiles rather than codes.
+ */
 const scenarios = [
   ['ideal', ['--preset', 'ideal', '--hold', '6'], 9],
   ['good', ['--preset', 'good', '--hold', '6'], 9],
@@ -85,7 +89,43 @@ const scenarios = [
   ['P4-balanced, poor, close up', ['--profile', 'p4', '--preset', 'poor', '--hold', '6', '--fill', '0.9'], 8],
   ['P2-standard, typical, 4K', ['--profile', 'p2', '--preset', 'typical', '--hold', '6', '--camera', '2160x3840'], 9],
   ['P3-dense, typical, 4K', ['--profile', 'p3', '--preset', 'typical', '--hold', '6', '--camera', '2160x3840', '--fill', '0.9'], 9],
+
+  ['D1-swift, typical', ['--profile', 'd1', '--preset', 'typical', '--hold', '2'], 120],
+  ['D2-rapid, typical', ['--profile', 'd2', '--preset', 'typical', '--hold', '2'], 220],
+  ['D3-blaze, good', ['--profile', 'd3', '--preset', 'good', '--hold', '2'], 450],
+  ['D3-blaze, typical', ['--profile', 'd3', '--preset', 'typical', '--hold', '2', '--fill', '0.88'], 380],
+  ['D3-blaze, typical, further away', ['--profile', 'd3', '--preset', 'typical', '--hold', '2'], 350],
+  ['D3-blaze, typical, bent lens', ['--profile', 'd3', '--preset', 'typical', '--hold', '2', '--fill', '0.88', '--distortion', '0.04'], 350],
+  ['D3-blaze, typical, shaky', ['--profile', 'd3', '--preset', 'typical', '--hold', '2', '--fill', '0.88', '--shake', '0.6'], 300],
+  // White half as bright again as the sensor can measure. A dark module among
+  // light ones is then as white as they are, and nothing that reads the picture
+  // afterwards can know it was there.
+  ['D3-blaze, typical, overexposed', ['--profile', 'd3', '--preset', 'typical', '--hold', '2', '--fill', '0.88', '--gain', '1.6'], 150],
+  ['D3-blaze, typical, 60 codes/s', ['--profile', 'd3', '--preset', 'typical', '--hold', '1', '--fill', '0.88'], 300],
+  ['D2-rapid, typical, 60 codes/s, 60 fps', ['--profile', 'd2', '--preset', 'typical', '--hold', '1', '--fps', '59', '--exposure', '6'], 450],
+  ['D3-blaze, typical, 60 codes/s, 60 fps', ['--profile', 'd3', '--preset', 'typical', '--hold', '1', '--fps', '59', '--exposure', '6', '--fill', '0.88'], 650],
+  ['D3-blaze, typical, 165 Hz screen, 60 fps', ['--profile', 'd3', '--preset', 'typical', '--hold', '3', '--refresh', '164.9', '--fps', '59', '--exposure', '6', '--fill', '0.88'], 600],
+  ['D3-blaze, poor', ['--profile', 'd3', '--preset', 'poor', '--hold', '2', '--fill', '0.88'], 0],
 ];
+
+/**
+ * A file for the dense rows, which none of them finishes: bytes that will not
+ * compress, and more of them than the fastest row moves in the time filmed.
+ * A row that finished would be measuring how long the file was.
+ */
+function denseFile(directory, seconds) {
+  const bytes = Buffer.alloc(Math.ceil(seconds * 1_400_000));
+  let state = 0x2545f491;
+  for (let index = 0; index < bytes.length; index += 1) {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    bytes[index] = state & 0xff;
+  }
+  const path = join(directory, 'dense.bin');
+  writeFileSync(path, bytes);
+  return path;
+}
 
 const work = mkdtempSync(join(tmpdir(), 'photon-matrix-'));
 let failures = 0;
@@ -101,15 +141,19 @@ console.log(
 );
 
 try {
+  const large = denseFile(work, options.seconds);
+
   for (const [name, extra, floor] of scenarios) {
     if (options.only && !name.includes(options.only)) continue;
 
     const frames = join(work, 'frames');
     rmSync(frames, { recursive: true, force: true });
 
+    const dense = /^d\d$/.test(extra[extra.indexOf('--profile') + 1] ?? '');
+    const sent = dense ? large : file;
     const filmed = execFileSync(
       photon,
-      ['film', file, '--out', frames, '--seconds', String(options.seconds), ...argumentsFor(extra)],
+      ['film', sent, '--out', frames, '--seconds', String(options.seconds), ...argumentsFor(extra)],
       { encoding: 'utf8' },
     );
     const shown = Number(/Codes\s+([\d.]+) per second/.exec(filmed)?.[1] ?? 0);
@@ -118,7 +162,7 @@ try {
     try {
       decoded = execFileSync(
         photon,
-        ['decode', frames, '--out', join(work, 'out'), '--truth', file],
+        ['decode', frames, '--out', join(work, 'out'), '--truth', sent],
         { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
       );
     } catch (error) {
@@ -127,17 +171,31 @@ try {
     }
 
     const count = (label) => Number(new RegExp(`^${label}\\s+(\\d+)`, 'm').exec(decoded)?.[1] ?? 0);
-    const codes = count('decoded');
-    const lost = count('not located') + count('header unreadable');
-    const perCell = /Pixels per cell\s+([\d.]+)/.exec(decoded)?.[1] ?? '—';
+    const capacity = Number(/Carries\s+(\d+) bytes/.exec(filmed)?.[1] ?? 0);
     const median = /median ([\d.]+)%/.exec(decoded)?.[1] ?? '—';
 
-    const capacity = Number(/Carries\s+(\d+) bytes/.exec(filmed)?.[1] ?? 0);
-    const rate = codes / options.seconds;
-    const ok = rate >= floor;
+    let perCell;
+    let lost;
+    let rate;
+    let throughput;
+    let ok;
+    if (dense) {
+      // Tiles, not codes: what was carried is what the tiles that read
+      // carried, and a code's worth of them is a code.
+      throughput = Number(/^Rate\s+([\d.]+) KB\/s/m.exec(decoded)?.[1] ?? 0);
+      rate = capacity > 0 ? (throughput * 1024) / capacity : 0;
+      perCell = /Pixels per module\s+([\d.]+)/.exec(decoded)?.[1] ?? '—';
+      lost = count('not located') + count('no tile');
+      ok = throughput >= floor;
+    } else {
+      rate = count('decoded') / options.seconds;
+      throughput = (rate * capacity) / 1024;
+      perCell = /Pixels per cell\s+([\d.]+)/.exec(decoded)?.[1] ?? '—';
+      lost = count('not located') + count('header unreadable');
+      ok = rate >= floor;
+    }
     if (!ok) failures += 1;
 
-    const throughput = (rate * capacity) / 1024;
     results.push({
       name,
       arguments: argumentsFor(extra),
@@ -186,4 +244,7 @@ console.log();
 console.log('CODES/S is distinct codes read, of the OF shown, by a decoder that looks at');
 console.log('every picture. KB/S is what those codes carried. LOST is pictures in which');
 console.log('the code was not found or its header would not read.');
+console.log('Of a dense code, D1 to D3, a picture yields tiles: KB/S is what the tiles');
+console.log('that read carried, CODES/S is that many codes\' worth, and LOST is pictures');
+console.log('that yielded none. MEDIAN WRONG is of modules, in the tiles that read.');
 process.exit(failures === 0 ? 0 : 1);

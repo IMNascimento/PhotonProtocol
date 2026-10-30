@@ -8,6 +8,7 @@
 
 mod bench;
 mod decode;
+mod dense;
 mod encode;
 mod film;
 mod inspect;
@@ -18,6 +19,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use photon_core::dense::{DENSE_PROFILES, DenseLayout, DenseProfile};
 use photon_core::simulate::{Channel, measure};
 use photon_core::{PROTOCOL_VERSION, ProfileId, SPEC_VERSION, profile::PROFILES};
 
@@ -39,6 +41,11 @@ const SWEEP_CELL_PX: u32 = 12;
     disable_help_subcommand = true
 )]
 struct Cli {
+    /// Read and paint frames as they were before they were whitened. For
+    /// pictures taken with an earlier build.
+    #[arg(long, global = true)]
+    unwhitened: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -97,6 +104,11 @@ enum Command {
         /// Print the comparison for every frame, not only the summary.
         #[arg(long)]
         verbose: bool,
+        /// The session the file was sent in, for `--truth` when the pictures
+        /// are of a dense code and not one tile of them read to say. The
+        /// sending page reports it with `?capture`.
+        #[arg(long)]
+        session: Option<u32>,
     },
 
     /// Film a transfer with a simulated phone camera pointed at a simulated
@@ -123,9 +135,11 @@ enum Command {
         /// Display refresh rate.
         #[arg(long, default_value_t = 60.0)]
         refresh: f64,
-        /// The camera's picture, as `WIDTHxHEIGHT`.
-        #[arg(long, default_value = "1080x1920")]
-        camera: String,
+        /// The camera's picture, as `WIDTHxHEIGHT`. A phone held upright,
+        /// 1080x1920, when not given; on its side for a dense profile, whose
+        /// codes are the shape of the screen.
+        #[arg(long)]
+        camera: Option<String>,
         /// Pictures per second.
         #[arg(long, default_value_t = 30.0)]
         fps: f64,
@@ -212,14 +226,33 @@ enum Profile {
     P3,
     /// `P4-balanced`.
     P4,
+    /// `D1-swift`: black and white, in tiles, five pixels to a module.
+    D1,
+    /// `D2-rapid`: four pixels to a module.
+    D2,
+    /// `D3-blaze`: three pixels to a module.
+    D3,
+}
+
+impl Profile {
+    /// The dense profile this names, if it names one.
+    fn dense(self) -> Option<&'static DenseProfile> {
+        match self {
+            Self::D1 => DENSE_PROFILES.first(),
+            Self::D2 => DENSE_PROFILES.get(1),
+            Self::D3 => DENSE_PROFILES.get(2),
+            _ => None,
+        }
+    }
 }
 
 impl From<Profile> for ProfileId {
     fn from(profile: Profile) -> Self {
         match profile {
-            Profile::P1 => Self::P1Conservative,
             Profile::P2 => Self::P2Standard,
             Profile::P3 => Self::P3Dense,
+            // A dense profile is looked for first, and is never asked this.
+            Profile::P1 | Profile::D1 | Profile::D2 | Profile::D3 => Self::P1Conservative,
             Profile::P4 => Self::P4Balanced,
         }
     }
@@ -227,22 +260,39 @@ impl From<Profile> for ProfileId {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if cli.unwhitened {
+        photon_core::session::set_whitening(false);
+    }
 
     let outcome = match cli.command {
+        Command::Encode { profile, .. } if profile.dense().is_some() => {
+            Err("encode writes the cell profiles only; film a dense profile instead".to_owned())
+        }
         Command::Encode { input, out, profile, cell_px, passes, fps, video } => {
             let target = out.unwrap_or_else(|| encode::default_output(&input));
             encode::run(&input, &target, profile.into(), cell_px, passes, fps, video)
         }
-        Command::Decode { input, out, profile, max_frames, debug_dir, truth, verbose } => {
-            decode::run(&decode::Options {
-                input: &input,
-                output: &out,
-                profile: profile.map(Into::into),
-                max_frames,
-                debug_dir: debug_dir.as_deref(),
-                truth: truth.as_deref(),
-                verbose,
-            })
+        Command::Decode { input, out, profile, max_frames, debug_dir, truth, verbose, session } => {
+            if dense::is_dense(&input, profile.map(|p| p.dense().is_some())) {
+                dense::run(&dense::Options {
+                    input: &input,
+                    output: &out,
+                    max_frames,
+                    truth: truth.as_deref(),
+                    verbose,
+                    session,
+                })
+            } else {
+                decode::run(&decode::Options {
+                    input: &input,
+                    output: &out,
+                    profile: profile.map(Into::into),
+                    max_frames,
+                    debug_dir: debug_dir.as_deref(),
+                    truth: truth.as_deref(),
+                    verbose,
+                })
+            }
         }
         Command::Film {
             input,
@@ -269,32 +319,23 @@ fn main() -> ExitCode {
             no_png,
             y4m,
         } => (|| {
-            let mut model = film::CameraModel::preset(preset);
-            if let Some(value) = fill {
-                model.fill = value;
-            }
-            if let Some(value) = blur {
-                model.blur = value;
-            }
-            if let Some(value) = distortion {
-                model.distortion = value;
-            }
-            if let Some(value) = exposure {
-                model.exposure_ms = value;
-            }
-            if let Some(value) = readout {
-                model.readout_ms = value;
-            }
-            if let Some(value) = gain {
-                model.gain = value;
-            }
-            if let Some(value) = shake {
-                model.shake = value;
-            }
+            let model = film::CameraModel::preset(preset).with(&film::Overrides {
+                fill,
+                blur,
+                distortion,
+                exposure,
+                readout,
+                gain,
+                shake,
+            });
+            let camera = camera.unwrap_or_else(|| {
+                if profile.dense().is_some() { "1920x1080" } else { "1080x1920" }.to_owned()
+            });
             film::run(&film::Options {
                 input,
                 out,
                 profile: profile.into(),
+                dense: profile.dense(),
                 screen: parse_size(&screen)?,
                 cell_px,
                 hold,
@@ -432,6 +473,30 @@ fn print_profiles() {
             let shortened = format!("+ RS({n},{k})");
             println!("{:<16} {:>4} {:>9} {:>5} {:>10} {:>15}", "", "", "", "", "", shortened);
         }
+    }
+
+    println!();
+    println!(
+        "{:<16} {:>4} {:>9} {:>7} {:>10} {:>15} {:>10}",
+        "DENSE PROFILE", "ID", "MODULES", "TILES", "SYMBOL", "TILE RS", "CAPACITY"
+    );
+    for profile in &DENSE_PROFILES {
+        let layout = DenseLayout::new(profile);
+        println!(
+            "{:<16} {:>#04x} {:>9} {:>7} {:>8} B {:>15} {:>8} B",
+            profile.name,
+            profile.id,
+            format!("{}x{}", profile.width(), profile.height()),
+            format!("{}x{}", profile.tile_cols, profile.tile_rows),
+            layout.symbol_size(),
+            // Of a tile in the middle of the frame, which is most of them.
+            {
+                let codewords = layout.codewords(profile.tile_cols + 1);
+                let (length, data) = codewords.first().copied().unwrap_or((0, 0));
+                format!("{}xRS({length},{data})", codewords.len())
+            },
+            layout.bytes_per_frame(),
+        );
     }
 
     println!();
