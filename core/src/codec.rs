@@ -483,7 +483,7 @@ mod tests {
         payload[2] = 0xFF;
 
         let (parsed, rejected) = parse_units(&payload, payload.len());
-        assert!(parsed.is_empty());
+        assert_eq!(parsed, [] as [PayloadUnit; 0], "a length past the frame must yield no unit");
         assert_eq!(rejected, 1);
     }
 
